@@ -1,0 +1,75 @@
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+
+const api = {
+  server: {
+    getConfig: () => ipcRenderer.invoke('server:getConfig'),
+    setConfig: (patch: unknown) => ipcRenderer.invoke('server:setConfig', patch),
+    getStatus: () => ipcRenderer.invoke('server:getStatus'),
+    start: () => ipcRenderer.invoke('server:start'),
+    stop: () => ipcRenderer.invoke('server:stop'),
+    freePort: () => ipcRenderer.invoke('server:freePort')
+  },
+  accounts: {
+    list: () => ipcRenderer.invoke('accounts:list'),
+    create: (p: unknown) => ipcRenderer.invoke('accounts:create', p),
+    delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
+    setPassword: (p: unknown) => ipcRenderer.invoke('accounts:setPassword', p),
+    setEnabled: (p: unknown) => ipcRenderer.invoke('accounts:setEnabled', p),
+    generatePassword: (len?: number) => ipcRenderer.invoke('accounts:generatePassword', len)
+  },
+  grants: {
+    add: (p: unknown) => ipcRenderer.invoke('grants:add', p),
+    remove: (grantId: number) => ipcRenderer.invoke('grants:remove', grantId),
+    setNode: (p: unknown) => ipcRenderer.invoke('grants:setNode', p)
+  },
+  audit: {
+    list: (limit?: number) => ipcRenderer.invoke('audit:list', limit)
+  },
+  client: {
+    connect: (opts: unknown) => ipcRenderer.invoke('client:connect', opts),
+    list: () => ipcRenderer.invoke('client:list'),
+    disconnect: (id?: string) => ipcRenderer.invoke('client:disconnect', id),
+    state: (id?: string) => ipcRenderer.invoke('client:state', id),
+    request: (id: string, method: string, params: Record<string, unknown>) =>
+      ipcRenderer.invoke('client:request', { id, method, params }),
+    pendingTransfers: () => ipcRenderer.invoke('client:pendingTransfers'),
+    decideTransfer: (p: unknown) => ipcRenderer.invoke('client:decideTransfer', p)
+  },
+  p2p: {
+    prepareReceive: (p: unknown) => ipcRenderer.invoke('p2p:prepareReceive', p),
+    /** Electron 45 已移除 file.path，用 webUtils 取本地绝对路径（上传用） */
+    getPathForFile: (file: File) => webUtils.getPathForFile(file)
+  },
+  transfers: {
+    list: (state?: string) => ipcRenderer.invoke('transfer:list', state),
+    cancel: (id: number) => ipcRenderer.invoke('transfer:cancel', id),
+    resume: (id: number) => ipcRenderer.invoke('transfer:resume', id),
+    remove: (id: number) => ipcRenderer.invoke('transfer:remove', id),
+    clearFinished: () => ipcRenderer.invoke('transfer:clearFinished'),
+    fail: (sessionId: string, message: string) => ipcRenderer.invoke('transfer:fail', { sessionId, message }),
+    startUpload: (p: unknown) => ipcRenderer.invoke('transfer:startUpload', p)
+  },
+  history: {
+    list: () => ipcRenderer.invoke('history:list'),
+    remove: (id: number) => ipcRenderer.invoke('history:remove', id)
+  },
+  window: {
+    openMain: () => ipcRenderer.invoke('window:openMain'),
+    closeFloater: () => ipcRenderer.invoke('window:closeFloater'),
+    showFloater: () => ipcRenderer.invoke('window:showFloater'),
+    quit: () => ipcRenderer.invoke('window:quit')
+  },
+  pageId: {
+    load: () => ipcRenderer.invoke('page-id:load'),
+    save: (key: string, id: string) => ipcRenderer.invoke('page-id:save', { key, id })
+  },
+  on: (channel: string, cb: (payload: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, payload: unknown): void => cb(payload)
+    ipcRenderer.on(channel, handler)
+    return () => ipcRenderer.removeListener(channel, handler)
+  }
+}
+
+contextBridge.exposeInMainWorld('api', api)
+
+export type LatticeApi = typeof api
