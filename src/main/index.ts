@@ -76,6 +76,9 @@ function createFloater(): void {
   floaterWindow.setAlwaysOnTop(true, 'floating')
   floaterWindow.setVisibleOnAllWorkspaces(true)
   attachDebug(floaterWindow, 'floater')
+  floaterWindow.on('closed', () => {
+    floaterWindow = null
+  })
   floaterWindow.on('moved', () => {
     if (!floaterWindow) return
     const [x, y] = floaterWindow.getPosition()
@@ -90,11 +93,12 @@ function createFloater(): void {
 }
 
 function createMainWindow(): void {
-  if (mainWindow) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
     mainWindow.focus()
     return
   }
+  mainWindow = null
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
@@ -130,9 +134,16 @@ function createMainWindow(): void {
   }
 }
 
+function safeSend(win: BrowserWindow | null, channel: string, payload?: unknown): void {
+  // 窗口可能已销毁（退出中/渲染进程崩溃），此时调用 send 会抛 "Object has been destroyed"
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send(channel, payload)
+  }
+}
+
 function sendToAll(channel: string, payload: unknown): void {
-  mainWindow?.webContents.send(channel, payload)
-  floaterWindow?.webContents.send(channel, payload)
+  safeSend(mainWindow, channel, payload)
+  safeSend(floaterWindow, channel, payload)
 }
 
 function createTray(): void {
@@ -334,9 +345,11 @@ function registerIpc(): void {
 
   // 窗口
   ipcMain.handle('window:openMain', () => createMainWindow())
-  ipcMain.handle('window:closeFloater', () => floaterWindow?.hide())
+  ipcMain.handle('window:closeFloater', () => {
+    if (floaterWindow && !floaterWindow.isDestroyed()) floaterWindow.hide()
+  })
   ipcMain.handle('window:showFloater', () => {
-    floaterWindow?.show()
+    if (floaterWindow && !floaterWindow.isDestroyed()) floaterWindow.show()
   })
   ipcMain.handle('window:quit', () => {
     isQuitting = true
@@ -360,7 +373,7 @@ function setupClient(): void {
         })
         n.on('click', () => createMainWindow())
         n.show()
-        floaterWindow?.webContents.send('floater:alert')
+        safeSend(floaterWindow, 'floater:alert')
       } else if (ev.event === 'transfer:progress') {
         // 对端发送方取消/失败时，把本机对应的接收记录从「进行中」落到终态，避免永久卡住
         const d = ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string }
