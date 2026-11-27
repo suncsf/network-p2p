@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, stat, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
 import {
@@ -264,19 +264,11 @@ export interface P2PReceiveOptions {
   chunkSize?: number
 }
 
-/** 接收过程先写入的临时文件后缀，完成后更名为正式名称 */
-const TMP_SUFFIX = '.tmp'
-
-/** P2P 接收端服务器：附带「标记用户主动取消」能力（关闭后清理临时文件） */
-export interface P2PReceiveServer extends net.Server {
-  /** 标记会话为用户主动取消：socket 关闭后删除该会话已生成的 .tmp 临时文件（区别于网络中断的保留续传） */
-  markCancelled: (sessionId: string) => void
-}
+/** P2P 接收端服务器 */
+export type P2PReceiveServer = net.Server
 
 /** 下载端：监听端口，处理单个传输连接 */
 export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
-  /** 用户主动取消的会话（下载端取消 / 拒绝继续），socket 关闭后删除临时文件 */
-  const cancelledSessions = new Set<string>()
   const server = net.createServer((socket) => {
     const parser = new FrameParser(onFrame)
     socket.on('data', (c) => {
@@ -299,7 +291,7 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
     const writers = new Map<number, import('node:fs/promises').FileHandle>()
 
     /** 解析清单文件的本地目标路径：应用重名「重命名」映射，统一安全校验 */
-    function resolveTarget(f: { path: string }): { abs: string; tmp: string } {
+    function resolveTarget(f: { path: string }): { abs: string } {
       const mapped = opts.mapRelPath?.(sessionId, f.path) ?? f.path
       const segments = mapped.replace(/\\/g, '/').split('/').filter((s) => s && s !== '.')
       if (segments.some((s) => s === '..') || path.isAbsolute(mapped)) {
@@ -310,42 +302,24 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
       if (rel.startsWith('..') || path.isAbsolute(rel)) {
         throw new Error('清单路径越界')
       }
-      return { abs, tmp: abs + TMP_SUFFIX }
+      return { abs }
     }
 
-    /** 删除该会话所有已生成的临时文件（用户取消传输时调用） */
-    async function cleanupTmp(): Promise<void> {
-      if (!manifest) return
-      for (const f of manifest.files) {
-        try {
-          await rm(resolveTarget(f).tmp, { force: true })
-        } catch {
-          /* 单个文件清理失败不阻断其余 */
-        }
-      }
-    }
-
-    /** 全部接收完成：关闭句柄后把 .tmp 临时文件更名为正式名称（覆盖时先删除同名旧文件） */
+    /** 全部接收完成后补建零字节文件（空文件没有分块，不会经过 CHUNK 落盘） */
     async function finalizeFiles(): Promise<void> {
       if (!manifest) return
       for (const f of manifest.files) {
         try {
-          const { abs, tmp } = resolveTarget(f)
-          const hasTmp = await stat(tmp).then(
+          const { abs } = resolveTarget(f)
+          const exists = await stat(abs).then(
             () => true,
             () => false
           )
-          if (hasTmp) {
-            // Windows 下 rename 不覆盖已存在文件：覆盖语义先删除同名旧文件再更名
-            // （不递归：目标是目录时更名失败并保留 .tmp，避免误删整个目录）
-            await rm(abs, { force: true })
-            await rename(tmp, abs)
-          } else if (f.size === 0) {
-            // 零字节文件没有分块传输：直接落一个空文件
+          if (!exists && f.size === 0) {
             await writeFile(abs, Buffer.alloc(0))
           }
         } catch {
-          /* 单个文件更名失败不阻断其余 */
+          /* 单个文件补建失败不阻断其余 */
         }
       }
     }
@@ -364,11 +338,6 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
         }
         for (const fh of writers.values()) await fh.close().catch(() => {})
         writers.clear()
-        // 用户主动取消：删除已生成的临时文件（网络中断则保留 .tmp 以支持断点续传）
-        if (cancelledSessions.has(sessionId)) {
-          cancelledSessions.delete(sessionId)
-          await cleanupTmp()
-        }
       })
     })
 
@@ -417,12 +386,12 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
         case P2PFrameType.MANIFEST: {
           if (!tokenValid) return
           manifest = JSON.parse(payload.toString('utf8')) as P2PManifest
-          // 续传：统计各文件临时文件（.tmp）在磁盘上已有的字节数，通过 DECISION 返回给上传端
+          // 续传：统计各文件在磁盘上已有的字节数，通过 DECISION 返回给上传端
           if (resumeMode) {
             for (const f of manifest.files) {
               try {
-                const { tmp } = resolveTarget(f)
-                const info = await stat(tmp)
+                const { abs } = resolveTarget(f)
+                const info = await stat(abs)
                 offsets.set(f.id, Math.max(0, Math.min(info.size, f.size)))
               } catch {
                 offsets.set(f.id, 0)
@@ -472,12 +441,11 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
           if (!fh) {
             const file = manifest.files.find((f) => f.id === fileId)
             if (!file) return
-            const { abs, tmp } = resolveTarget(file)
+            const { abs } = resolveTarget(file)
             await mkdir(path.dirname(abs), { recursive: true })
-            // 先写临时文件 .tmp，全部接收完成后再更名为正式名称；
-            // 续传且已有部分数据时以 r+ 打开（保留已收内容）；否则 w 截断重写
+            // 直接写正式文件名（不经过临时文件）；续传且已有部分数据时以 r+ 打开（保留已收内容），否则 w 截断重写
             const startOff = resumeMode ? (offsets.get(fileId) ?? 0) : 0
-            fh = await open(tmp, startOff > 0 ? 'r+' : 'w')
+            fh = await open(abs, startOff > 0 ? 'r+' : 'w')
             writers.set(fileId, fh)
           }
           await fh.write(data, 0, data.length, offset)
@@ -512,9 +480,6 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
       }
     }
   }) as P2PReceiveServer
-  server.markCancelled = (sessionId: string): void => {
-    cancelledSessions.add(sessionId)
-  }
   return server
 }
 

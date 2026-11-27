@@ -47,7 +47,7 @@ async function waitSize(p: string, pred: (n: number) => boolean, tries = 3000): 
   try { return statSync(p).size } catch { return -1 }
 }
 
-/** 等待最终文件出现且达到指定大小（接收端在传输完成后才把 .tmp 更名为正式文件） */
+/** 等待文件出现且达到指定大小（接收端直接写正式文件，无临时文件） */
 async function waitFinal(p: string, size: number, tries = 3000): Promise<void> {
   await waitSize(p, (n) => n === size, tries)
   expect(statSync(p).size).toBe(size)
@@ -133,9 +133,9 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     const rec = runnerB.startUpload({
       connId, root: sharedA, path: 'up.bin', filePath: src, name: 'up.bin', size: 12 * 1024 * 1024
     })
-    // 等远端出现部分临时文件（接收端先写 .tmp，完成后更名）后断开连接模拟中断
+    // 等远端出现部分数据（接收端直接写正式文件）后断开连接模拟中断
     const remote = path.join(sharedA, 'up.bin')
-    await waitSize(remote + '.tmp', (n) => n > 512 * 1024)
+    await waitSize(remote, (n) => n > 512 * 1024)
     await conns.disconnect(connId)
     const interrupted = await waitState(storeB, rec.id, ['interrupted', 'cancelled', 'completed'])
     expect(interrupted.state).toBe('interrupted')
@@ -173,8 +173,8 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       host: grant.host, port: grant.port, p2pToken: grant.p2pToken, sessionId: grant.sessionId,
       rename: 'saved.bin'
     })
-    await waitSize(dest + '.tmp', (n) => n > 512 * 1024)
-    // 模拟网络中断：发送端停止推送（非用户取消，接收端保留 .tmp 断点）
+    await waitSize(dest, (n) => n > 512 * 1024)
+    // 模拟网络中断：发送端停止推送（接收端保留已收部分，可断点续传）
     serverA.cancelPush(grant.sessionId, '模拟中断')
     await wait(500)
     const interrupted = await waitState(storeB, rec.id, ['interrupted'])
@@ -210,8 +210,8 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       root: sharedA, paths: ['photos', 'notes.txt'],
       host: grant.host, port: grant.port, p2pToken: grant.p2pToken, sessionId: grant.sessionId
     })
-    await waitSize(path.join(recvDir, 'photos', 'a.jpg') + '.tmp', (n) => n > 512 * 1024)
-    // 模拟网络中断：发送端停止推送（非用户取消，接收端保留 .tmp 断点）
+    await waitSize(path.join(recvDir, 'photos', 'a.jpg'), (n) => n > 512 * 1024)
+    // 模拟网络中断：发送端停止推送（接收端保留已收部分，可断点续传）
     serverA.cancelPush(grant.sessionId, '模拟中断')
     await wait(500)
     await waitState(storeB, rec.id, ['interrupted'])
@@ -237,8 +237,8 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       host: grantB.host, port: grantB.port, p2pToken: grantB.p2pToken, sessionId,
       rename: 's7.bin'
     })
-    await waitSize(dest + '.tmp', (n) => n > 512 * 1024)
-    // 模拟网络中断：发送端停止推送（非用户取消，接收端保留 .tmp 断点）
+    await waitSize(dest, (n) => n > 512 * 1024)
+    // 模拟网络中断：发送端停止推送（接收端保留已收部分，可断点续传）
     serverA.cancelPush(sessionId, '模拟中断')
     await wait(500)
     const sendRecs = storeA.getBySession(sessionId).filter((r) => r.kind === 'p2p-send')
@@ -260,7 +260,7 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       root: sharedA, path: 'push-src.bin',
       host: grantB.host, port: grantB.port, p2pToken: grantB.p2pToken, sessionId: grantB.sessionId
     })
-    await waitSize(dest + '.tmp', (n) => n > 512 * 1024)
+    await waitSize(dest, (n) => n > 512 * 1024)
     // 模拟网络中断：发送端停止推送
     serverA.cancelPush(grantB.sessionId, '模拟中断')
     await wait(500)
@@ -291,8 +291,8 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       host: grantB.host, port: grantB.port, p2pToken: grantB.p2pToken, sessionId,
       rename: 'push-src2.bin'
     })
-    await waitSize(dest + '.tmp', (n) => n > 512 * 1024)
-    // 模拟网络中断：发送端停止推送（非用户取消，接收端保留 .tmp 断点）
+    await waitSize(dest, (n) => n > 512 * 1024)
+    // 模拟网络中断：发送端停止推送（接收端保留已收部分，可断点续传）
     serverA.cancelPush(sessionId, '模拟中断')
     await wait(500)
     // A 侧应有一条 p2p-send 记录（storeA），状态 cancelled（发送端侧停止=本端取消，仍可续传）
@@ -331,7 +331,7 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       host: grant.host, port: grant.port, p2pToken: grant.p2pToken, sessionId: grant.sessionId,
       rename: 'pause-resume.bin'
     })
-    await waitSize(dest + '.tmp', (n) => n > 1024 * 1024)
+    await waitSize(dest, (n) => n > 1024 * 1024)
     await runnerB.pause(rec.id)
     const paused = await waitState(storeB, rec.id, ['paused'])
     expect(paused.state).toBe('paused')
@@ -340,16 +340,16 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     expect(sendRec).toBeDefined()
     const sendPaused = await waitState(storeA, sendRec!.id, ['paused', 'completed'])
     expect(sendPaused.state).toBe('paused')
-    // 暂停后落盘停止增长（发送端挂起，socket 保留）；先等 TCP 在途分块落盘稳定，部分数据在 .tmp
+    // 暂停后落盘停止增长（发送端挂起，socket 保留）；先等 TCP 在途分块落盘稳定
     let frozen = 0
     for (let i = 0; i < 200; i++) {
       await wait(50)
-      const cur = statSync(dest + '.tmp').size
+      const cur = statSync(dest).size
       if (cur === frozen) break
       frozen = cur
     }
     await wait(700)
-    expect(statSync(dest + '.tmp').size).toBe(frozen)
+    expect(statSync(dest).size).toBe(frozen)
     // 继续 → 原地恢复 → 完成
     await runnerB.resume(rec.id)
     const done = await waitState(storeB, rec.id, ['completed', 'interrupted', 'cancelled'])
@@ -368,20 +368,20 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
       connId, root: sharedA, path: 'pause-up.bin', filePath: src, name: 'pause-up.bin', size: big.length
     })
     const remote = path.join(sharedA, 'pause-up.bin')
-    await waitSize(remote + '.tmp', (n) => n > 1024 * 1024)
+    await waitSize(remote, (n) => n > 1024 * 1024)
     await runnerB.pause(rec.id)
     const paused = await waitState(storeB, rec.id, ['paused'])
     expect(paused.state).toBe('paused')
-    // 暂停后远端落盘停止增长（接收端先写 .tmp 临时文件）；先等最后一个在途分块落盘
+    // 暂停后远端落盘停止增长；先等最后一个在途分块落盘
     let frozen = 0
     for (let i = 0; i < 200; i++) {
       await wait(50)
-      const cur = statSync(remote + '.tmp').size
+      const cur = statSync(remote).size
       if (cur === frozen) break
       frozen = cur
     }
     await wait(700)
-    expect(statSync(remote + '.tmp').size).toBe(frozen)
+    expect(statSync(remote).size).toBe(frozen)
     // 继续 → 完成
     await runnerB.resume(rec.id)
     const done = await waitState(storeB, rec.id, ['completed', 'interrupted'])
@@ -416,7 +416,7 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     })
     const sendRec = storeA.getBySession(grant.sessionId).find((r) => r.kind === 'p2p-send')
     expect(sendRec).toBeDefined()
-    await waitSize(dest + '.tmp', (n) => n > 1024 * 1024)
+    await waitSize(dest, (n) => n > 1024 * 1024)
     // 发送端暂停 → 本机记录暂停 + 广播 → 接收端记录经广播同步为「已暂停」
     await runnerA!.pause(sendRec!.id)
     expect((await waitState(storeA, sendRec!.id, ['paused'])).state).toBe('paused')

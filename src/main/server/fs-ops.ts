@@ -182,9 +182,8 @@ export class FileOps {
     const abs = this.abs(rootPath, relPath)
     await fsp.mkdir(path.dirname(abs), { recursive: true })
     const id = randomUUID()
-    // 接收时先写临时文件 .tmp，完成后（finishUpload）再更名为正式名称
-    const tmp = abs + UPLOAD_TMP_SUFFIX
-    const handle = await fsp.open(tmp, 'w')
+    // 直接写正式文件名（不经过临时文件），分块按偏移落盘
+    const handle = await fsp.open(abs, 'w')
     uploadTable.set(id, { path: abs, handle })
     return { uploadId: id }
   }
@@ -196,18 +195,15 @@ export class FileOps {
     await u.handle.write(buf, 0, buf.length, offset)
   }
 
-  /** 接收完成：关闭句柄，把 .tmp 临时文件更名为正式名称（覆盖时先删除同名旧文件） */
+  /** 接收完成：关闭句柄（数据已直接写入正式文件） */
   async finishUpload(uploadId: string): Promise<void> {
     const u = uploadTable.get(uploadId)
     if (!u) throw Object.assign(new Error('未知上传'), { code: 'NOT_FOUND' as const })
     uploadTable.delete(uploadId)
     await u.handle.close()
-    const tmp = u.path + UPLOAD_TMP_SUFFIX
-    await fsp.rm(u.path, { force: true }).catch(() => {})
-    await fsp.rename(tmp, u.path)
   }
 
-  /** 取消上传：关闭句柄并删除已生成的 .tmp 临时文件 */
+  /** 取消上传：关闭句柄（已写入的部分数据保留在正式文件，可断点续传） */
   async abortUpload(uploadId: string): Promise<void> {
     const u = uploadTable.get(uploadId)
     if (!u) return
@@ -217,12 +213,8 @@ export class FileOps {
     } catch {
       /* ignore */
     }
-    await fsp.rm(u.path + UPLOAD_TMP_SUFFIX, { force: true }).catch(() => {})
   }
 }
-
-/** WS 接收过程的临时文件后缀 */
-const UPLOAD_TMP_SUFFIX = '.tmp'
 
 export interface UploadState {
   path: string

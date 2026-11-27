@@ -958,9 +958,8 @@ export class LatticeServer {
     return true
   }
 
-  /** 下载端主动中止：标记取消（关闭后清理临时文件）并断开该会话的下载 socket（上传端会感知失败） */
+  /** 下载端主动中止：断开该会话的下载 socket（上传端会感知失败；已收部分保留，可断点续传） */
   abortReceive(sessionId: string): void {
-    this.p2pServer?.markCancelled(sessionId)
     const s = this.recvSockets.get(sessionId)
     if (s) s.destroy()
   }
