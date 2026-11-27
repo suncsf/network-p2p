@@ -1,4 +1,4 @@
-# Lattice
+# v-Lattice
 
 基于 **Electron + Element Plus + SQLite** 的双模式文件工具：既可连接远程文件服务，也可自建服务端；文件/目录传输采用**局域网 P2P 直连**。
 

@@ -75,7 +75,7 @@
           <span class="h-host">{{ h.host }}:{{ h.port }}</span>
           <span class="h-user">{{ h.username }}</span>
         </div>
-        <el-button text type="primary" size="small" @click="quickConnect(h)">连接</el-button>
+        <el-button text type="danger" size="small" @click.stop="removeHistory(h)">删除</el-button>
       </div>
       <template #footer>
         <el-button @click="showNew = false">取消</el-button>
@@ -120,7 +120,7 @@ async function loadHistory(): Promise<void> {
   history.value = (await window.api.history.list()) as typeof history.value
 }
 
-/** 点击历史记录：填入参数并带出记住的密码 */
+/** 点击历史记录：仅填入表单（带出记住的密码），由用户确认后再点「连接」 */
 async function fillHistory(h: { id: number; host: string; port: number; username: string; hasPassword: boolean }): Promise<void> {
   form.host = h.host
   form.port = h.port
@@ -129,10 +129,16 @@ async function fillHistory(h: { id: number; host: string; port: number; username
   error.value = ''
 }
 
-/** 一键直连历史记录 */
-async function quickConnect(h: { id: number; host: string; port: number; username: string; hasPassword: boolean }): Promise<void> {
-  await fillHistory(h)
-  await submit()
+/** 删除一条历史连接（连同记住的密码） */
+async function removeHistory(h: { id: number; host: string; port: number; username: string }): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`删除历史记录 ${h.host}:${h.port}（${h.username}）？`, '删除', { type: 'warning' })
+  } catch {
+    return
+  }
+  await window.api.history.remove(h.id)
+  ElMessage.success('已删除')
+  void loadHistory()
 }
 
 function label(c: ConnectionInfo): string {

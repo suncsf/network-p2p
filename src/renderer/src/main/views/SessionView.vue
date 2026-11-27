@@ -20,17 +20,7 @@
     </el-alert>
 
     <div v-else class="session-inner">
-      <el-radio-group v-model="tab" size="default" class="sub-tabs">
-        <el-radio-button value="files">文件</el-radio-button>
-        <el-radio-button value="transfers">传输</el-radio-button>
-      </el-radio-group>
-
-      <FilesView
-        v-show="tab === 'files'"
-        :connection-id="connection.id"
-        :grants="grants"
-      />
-      <TransfersView v-show="tab === 'transfers'" :connection-id="connection.id" />
+      <FilesView :connection-id="connection.id" :grants="grants" />
     </div>
   </div>
 </template>
@@ -40,10 +30,8 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ConnectionInfo, FileRootGrant } from '@shared/protocol'
 import FilesView from './FilesView.vue'
-import TransfersView from './TransfersView.vue'
 
 const props = defineProps<{ connection: ConnectionInfo }>()
-const tab = ref('files')
 const reconnecting = ref(false)
 
 const grants = computed<FileRootGrant[]>(() => props.connection.login?.grants ?? [])
@@ -92,9 +80,6 @@ const stateText = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-.sub-tabs {
-  align-self: flex-start;
 }
 .state-alert {
   max-width: 640px;

@@ -106,7 +106,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: true,
-    title: 'Lattice',
+    title: 'v-Lattice',
     icon: getIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -123,6 +123,10 @@ function createMainWindow(): void {
       e.preventDefault()
       mainWindow?.hide()
     }
+  })
+  // 最小化同样隐藏到托盘（任务栏不保留）
+  mainWindow.on('minimize', () => {
+    mainWindow?.hide()
   })
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -142,6 +146,18 @@ function safeSend(win: BrowserWindow | null, channel: string, payload?: unknown)
   }
 }
 
+/** 完全退出：托盘/悬浮球右键菜单共用。兜底 app.exit 防止挂起的 socket/handle 让进程残留 */
+function quitApp(): void {
+  isQuitting = true
+  try {
+    tray?.destroy()
+  } catch {
+    /* ignore */
+  }
+  app.quit()
+  setTimeout(() => app.exit(0), 800).unref?.()
+}
+
 function sendToAll(channel: string, payload: unknown): void {
   safeSend(mainWindow, channel, payload)
   safeSend(floaterWindow, channel, payload)
@@ -149,7 +165,7 @@ function sendToAll(channel: string, payload: unknown): void {
 
 function createTray(): void {
   tray = new Tray(getIcon())
-  tray.setToolTip('Lattice')
+  tray.setToolTip('v-Lattice')
   const menu = Menu.buildFromTemplate([
     { label: '显示主界面', click: () => createMainWindow() },
     {
@@ -163,13 +179,7 @@ function createTray(): void {
       }
     },
     { type: 'separator' },
-    {
-      label: '退出',
-      click: () => {
-        isQuitting = true
-        app.quit()
-      }
-    }
+    { label: '退出', click: () => quitApp() }
   ])
   tray.setContextMenu(menu)
   tray.on('click', () => createMainWindow())
@@ -430,9 +440,24 @@ function registerIpc(): void {
     const ny = Math.min(Math.max(y + dy, area.y - FLOATER_SIZE + 12), area.y + area.height - 12)
     floaterWindow.setPosition(Math.round(nx), Math.round(ny))
   })
-  ipcMain.handle('window:quit', () => {
-    isQuitting = true
-    app.quit()
+  ipcMain.handle('window:quit', () => quitApp())
+  // 悬浮球右键菜单：原生 Menu，弹出锚定在悬浮球窗口
+  ipcMain.handle('window:floaterMenu', () => {
+    if (!floaterWindow || floaterWindow.isDestroyed()) return
+    Menu.buildFromTemplate([
+      { label: '打开界面', click: () => createMainWindow() },
+      {
+        label: '传输',
+        click: () => {
+          createMainWindow()
+          // 主窗口可能刚创建（渲染层尚未挂载），先发一次，再延迟重发兜底
+          sendToAll('nav:goto', 'transfers')
+          setTimeout(() => sendToAll('nav:goto', 'transfers'), 800)
+        }
+      },
+      { type: 'separator' },
+      { label: '退出', click: () => quitApp() }
+    ]).popup({ window: floaterWindow })
   })
 }
 
@@ -483,6 +508,9 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(() => {
+  // 去掉 Electron 默认的顶部应用菜单
+  Menu.setApplicationMenu(null)
+
   const userData = app.getPath('userData')
   userDb = openDatabase(join(userData, 'lattice.db'))
   local = new LocalStore(openDatabase(join(userData, 'local.db')))

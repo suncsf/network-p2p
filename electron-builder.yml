@@ -1,6 +1,6 @@
 appId: com.lattice.app
-productName: Lattice
-copyright: Copyright © 2026 Lattice
+productName: v-Lattice
+copyright: Copyright © 2026 v-Lattice
 
 directories:
   buildResources: build
@@ -32,7 +32,7 @@ linux:
     - AppImage
     - deb
   category: Utility
-  maintainer: Lattice <lattice@example.com>
+  maintainer: v-Lattice <lattice@example.com>
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
 npmRebuild: true

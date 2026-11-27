@@ -31,6 +31,7 @@ export interface PageRegistryEntry {
 /** 固定页面 ID 表：routeName → aXXX。未登记的页面每次启动随机换号，用户反馈的 #XXXX 将无法回溯，务必登记。 */
 export const FIXED_PAGE_IDS: Record<string, string> = {
   workspace: 'a001',
+  transfers: 'a004',
   server: 'a002',
   settings: 'a003'
 }
@@ -46,6 +47,7 @@ export const FIXED_DIALOG_IDS: Record<string, string> = {
 /** 弹窗宿主前缀表：routeName → base（与 FIXED_PAGE_IDS 同值）。宿主在表内的弹窗自动获得稳定派生 ID。 */
 export const PAGE_DIALOG_BASE: Record<string, string> = {
   workspace: 'a001',
+  transfers: 'a004',
   server: 'a002',
   settings: 'a003'
 }

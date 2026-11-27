@@ -5,7 +5,7 @@
     @mousedown="onMouseDown"
     @mousemove="onMouseMove"
     @mouseup="onMouseUp"
-    @contextmenu.prevent
+    @contextmenu.prevent="onContextMenu"
   >
     <div class="ring" :style="ringStyle"></div>
     <div class="core">
@@ -33,8 +33,8 @@ const ringStyle = computed(() => {
 })
 
 function openMain(): void {
+  // 仅展开主界面，悬浮球保持常驻（设计为始终置顶；此前点击后隐藏悬浮球且无人再唤起，表现为"点一下就没了"）
   window.api.window.openMain()
-  window.api.window.closeFloater()
 }
 
 // 手动拖动：窗口整体 -webkit-app-region: no-drag 时系统拖动不生效，
@@ -73,6 +73,11 @@ function onMouseUp(): void {
   if (!dragging) return
   dragging = false
   if (!moved) openMain()
+}
+
+/** 右键弹出原生菜单（打开界面/传输/退出），由主进程渲染 */
+function onContextMenu(): void {
+  void window.api.window.floaterMenu()
 }
 
 onMounted(() => {

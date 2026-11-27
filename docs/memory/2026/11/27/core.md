@@ -34,6 +34,18 @@
 | Electron二进制缺失 | [调试环境.md](调试环境.md) | Error: Electron uninstall → node install.js + ELECTRON_MIRROR 环境变量 |
 | 测试EPERM | [调试环境.md](调试环境.md) | Windows 删 SQLite 临时目录被占用 → 测试清理前先 db.close() |
 | git代理 | [调试环境.md](调试环境.md) | 7890 失效，实测 7897（Clash Verge）可用；直连 GitHub 不稳定 |
+| 传输菜单独立 | [传输面板独立化.md](传输面板独立化.md) | 传输面板脱离连接 tab 成侧栏独立菜单：待确认请求来自本机服务端，与连接无关 |
+| 待确认传输角标 | [传输面板独立化.md](传输面板独立化.md) | 侧栏「传输」角标：transfer:incoming 即刷 + 3s 轮询 listPending 兜底（decide/超时无事件） |
+| 已传量显示 | [传输面板独立化.md](传输面板独立化.md) | 进行中记录恒显「已传 X / Y」，接收/推送/上传统一；volumeText() |
+| 悬浮球右键菜单 | [悬浮球交互.md](悬浮球交互.md) | 原生 Menu.popup：打开界面/传输（nav:goto 导航+800ms 重发兜底）/退出 |
+| 最小化隐藏托盘 | [悬浮球交互.md](悬浮球交互.md) | 主窗口 minimize 即 hide；Electron 45 该事件回调无参数、不可 preventDefault |
+| 完全退出 | [悬浮球交互.md](悬浮球交互.md) | quitApp()：isQuitting + tray.destroy + app.quit + 800ms 兜底 app.exit(0)，托盘/悬浮球共用 |
+| 页面保活 | [菜单切换保活.md](菜单切换保活.md) | 侧栏四页全 v-show 常驻不重挂载；pageActive 可见时轻量刷新数据不重置界面状态 |
+| 最近连接删除 | [历史连接管理.md](历史连接管理.md) | 历史记录可删（二次确认+history.remove 连密码删）；点击仅填表单，去掉一键直连 |
+| Electron菜单 | [移除应用菜单.md](移除应用菜单.md) | Menu.setApplicationMenu(null) 去掉顶部默认菜单；托盘/悬浮球自定义菜单不受影响，DevTools/刷新快捷键随菜单失效 |
+| setApplicationMenu | [移除应用菜单.md](移除应用菜单.md) | app.whenReady 开头置 null 即可，Win/Linux 通用 |
+| 软件更名 | [软件更名.md](软件更名.md) | Lattice → v-Lattice：窗口标题/托盘/品牌名/页面标题/包名/打包产物名/README 共 9 处文件 |
+| v-Lattice | [软件更名.md](软件更名.md) | 新软件名；userData 目录、appId、内部类名有意保留旧名防数据丢失/升级断裂 |
 
 ## 当日要点
 
@@ -47,3 +59,16 @@
 - 历史连接：openConnections 持久化恢复 + client:reconnect 一键重连 + 密码默认全部存储 + 最近连接列表回归 + 选项卡关闭修复（7e8756b、4e70754）。
 - 账户锁定恶性循环根除（鉴权失败停止自动重连）+ 服务端解锁按钮（821a12c）。
 - 接收确认补漏：WS 上传 uploadInit 确认、receive 授权确认先行（确认不依赖对方挂连接），测试增至 45 项全绿。
+
+### 第三轮（同日）
+
+- 传输面板独立成侧栏「传输」菜单（脱离连接 tab，固定页面 ID a004），进行中传输恒显「已传 X / Y」字节量，侧栏加待确认数角标（轮询兜底）。
+- 悬浮球：修复点击即消失（openMain 不再 closeFloater）、主窗口最小化隐藏到托盘、右键原生菜单（打开界面/传输/退出）、quitApp 完全退出（tray.destroy + app.exit 兜底）。
+- 侧栏四页 v-show 常驻保活（切换不刷新界面），pageActive 可见时轻量刷新数据。
+- 最近连接可删除（二次确认）、点击仅填表单不再一键直连。
+- 本轮均为渲染层 + 主进程小改，typecheck 0 错误；改动未提交 git。
+
+### 第三轮（同日）
+
+- 移除 Electron 自带菜单：`src/main/index.ts` 在 `app.whenReady()` 开头 `Menu.setApplicationMenu(null)`；托盘/悬浮球右键菜单不受影响，DevTools（Ctrl+Shift+I）/刷新（Ctrl+R）快捷键随默认菜单失效。
+- 软件更名 v-Lattice：9 处文件同步（主窗口标题、托盘 tooltip、App.vue 品牌名、index/floater 页面标题、package.json + lock 包名 v-lattice、electron-builder.yml productName/copyright/maintainer、README 标题）；userData 目录（lattice）、appId（com.lattice.app）、内部类名有意保留旧名，防已有数据丢失与覆盖安装断裂。

@@ -183,6 +183,19 @@ const status = ref<{ running: boolean; interfaces: string[] }>({ running: false,
 const permNames = PERMISSION_ORDER
 
 const emit = defineEmits<{ goSettings: [] }>()
+/** 页面是否可见：App.vue 全页面 v-show 常驻后，重新可见时轻量刷新数据（不重挂载、不丢界面状态） */
+const props = defineProps<{ pageActive?: boolean }>()
+
+watch(
+  () => props.pageActive,
+  (v) => {
+    if (v) {
+      loadStatus()
+      loadAccounts()
+      loadAudit()
+    }
+  }
+)
 
 function label(p: string): string {
   return PERMISSION_LABELS[p] ?? p

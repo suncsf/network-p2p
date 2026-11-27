@@ -3,11 +3,15 @@
     <el-aside width="200px" class="sidebar">
       <div class="brand">
         <el-icon :size="22"><Connection /></el-icon>
-        <span>Lattice</span>
+        <span>v-Lattice</span>
       </div>
       <el-menu :default-active="active" class="menu" @select="onSelect">
         <el-menu-item index="workspace">
           <el-icon><FolderOpened /></el-icon><span>工作区</span>
+        </el-menu-item>
+        <el-menu-item index="transfers">
+          <el-icon><Promotion /></el-icon><span>传输</span>
+          <el-badge v-if="pendingCount > 0" :value="pendingCount" class="menu-badge" />
         </el-menu-item>
         <el-menu-item index="server">
           <el-icon><Monitor /></el-icon><span>服务端</span>
@@ -23,14 +27,19 @@
     </el-aside>
 
     <el-main class="content">
-      <!-- 工作区 v-show 常驻（相当于 keep-alive 缓存页），服务端/设置 v-if 随切换装卸 -->
+      <!-- 全部页面 v-show 常驻（相当于 keep-alive 缓存页）：切换菜单不卸载组件，
+           保留各自的操作状态（传输记录筛选、滚动位置、表单内容等），仅按需隐藏 -->
       <PageWrapper v-show="active === 'workspace'" page-title="工作区" route-name="workspace">
         <WorkspaceView ref="workspaceRef" />
       </PageWrapper>
-      <PageWrapper v-if="active === 'server'" page-title="服务端" route-name="server">
-        <ServerView @go-settings="active = 'settings'" />
+      <!-- 传输页独立于连接：待确认请求来自本机服务端（不连接别人也会被推送），传输记录也是全局的 -->
+      <PageWrapper v-show="active === 'transfers'" page-title="传输" route-name="transfers">
+        <TransfersView :page-active="active === 'transfers'" />
       </PageWrapper>
-      <PageWrapper v-if="active === 'settings'" page-title="设置" route-name="settings">
+      <PageWrapper v-show="active === 'server'" page-title="服务端" route-name="server">
+        <ServerView :page-active="active === 'server'" @go-settings="active = 'settings'" />
+      </PageWrapper>
+      <PageWrapper v-show="active === 'settings'" page-title="设置" route-name="settings">
         <SettingsView />
       </PageWrapper>
     </el-main>
@@ -39,17 +48,30 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { Connection, FolderOpened, Monitor, Setting } from '@element-plus/icons-vue'
+import { Connection, FolderOpened, Monitor, Promotion, Setting } from '@element-plus/icons-vue'
 import WorkspaceView from './views/WorkspaceView.vue'
 import ServerView from './views/ServerView.vue'
 import SettingsView from './views/SettingsView.vue'
+import TransfersView from './views/TransfersView.vue'
 import PageWrapper from '@renderer/components/PageWrapper.vue'
 import type { ConnectionInfo } from '@shared/protocol'
 
 const active = ref('workspace')
 const connCount = ref(0)
+/** 待确认传输数：驱动侧栏角标（decide/超时无事件，轮询内存接口兜底） */
+const pendingCount = ref(0)
 const workspaceRef = ref<InstanceType<typeof WorkspaceView> | null>(null)
 let unsubs: Array<() => void> = []
+let pendingTimer: number | undefined
+
+async function refreshPending(): Promise<void> {
+  try {
+    const list = (await window.api.client.pendingTransfers()) as unknown[]
+    pendingCount.value = list.length
+  } catch {
+    /* 服务端未启动等情况忽略 */
+  }
+}
 
 function onSelect(index: string): void {
   active.value = index
@@ -62,9 +84,27 @@ onMounted(() => {
       connCount.value = (payload as ConnectionInfo[]).length
     })
   )
+  void refreshPending()
+  pendingTimer = window.setInterval(refreshPending, 3000)
+  unsubs.push(
+    window.api.on('server:event', (ev) => {
+      if ((ev as { event?: string }).event === 'transfer:incoming') void refreshPending()
+    })
+  )
+  // 悬浮球右键菜单「传输」等入口的跨页面导航
+  unsubs.push(
+    window.api.on('nav:goto', (page) => {
+      if (typeof page === 'string' && ['workspace', 'transfers', 'server', 'settings'].includes(page)) {
+        active.value = page
+      }
+    })
+  )
 })
 
-onUnmounted(() => unsubs.forEach((u) => u()))
+onUnmounted(() => {
+  unsubs.forEach((u) => u())
+  if (pendingTimer) clearInterval(pendingTimer)
+})
 </script>
 
 <style>
@@ -117,6 +157,10 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
+}
+:deep(.menu-badge) {
+  margin-left: 8px;
+  transform: translateY(-1px);
 }
 .st-dot {
   width: 8px;

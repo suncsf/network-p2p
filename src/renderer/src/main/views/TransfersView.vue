@@ -97,9 +97,12 @@
                 :show-text="!!row.total"
                 :stroke-width="8"
               />
-              <div v-if="speeds.get(row.id)" class="speed-line">
-                <span>{{ formatSize(speeds.get(row.id)!) }}/s</span>
-                <span v-if="row.total">· 剩余 {{ etaOf(row) }}</span>
+              <div class="speed-line">
+                <span>{{ volumeText(row) }}</span>
+                <template v-if="speeds.get(row.id)">
+                  <span>· {{ formatSize(speeds.get(row.id)!) }}/s</span>
+                  <span v-if="row.total">· 剩余 {{ etaOf(row) }}</span>
+                </template>
               </div>
             </template>
             <span v-else class="size-text">
@@ -131,11 +134,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { TransferRecord, TransferRequestEvent, TransferState } from '@shared/protocol'
-
-const props = defineProps<{ connectionId: string }>()
+// 独立于连接的全局页面：待确认请求来自本机服务端（对方可主动推送），传输记录也是全局的
+// App.vue 全页面 v-show 常驻：重新可见时轻量刷新数据（不重挂载，筛选/滚动等界面状态保留）
+const props = defineProps<{ pageActive?: boolean }>()
 void props
 
 const pending = ref<TransferRequestEvent[]>([])
@@ -165,6 +169,13 @@ function bar(p: TransferRequestEvent): number {
 function pct(r: TransferRecord): number {
   if (!r.total) return 0
   return Math.min(100, Math.round((r.transferred / r.total) * 100))
+}
+
+/** 进行中记录的已传量文案：接收/推送都直观显示当前传了多少 */
+function volumeText(r: TransferRecord): string {
+  return r.total
+    ? `已传 ${formatSize(r.transferred)} / ${formatSize(r.total)}`
+    : `已传 ${formatSize(r.transferred)}`
 }
 
 /** 每条记录的实时速度（字节/秒，EWMA 平滑） */
@@ -293,6 +304,12 @@ async function clearFinished(): Promise<void> {
 
 onMounted(() => {
   refresh()
+  watch(
+    () => props.pageActive,
+    (v) => {
+      if (v) refresh()
+    }
+  )
   timer = window.setInterval(() => {
     now.value = Date.now()
   }, 500)
