@@ -27,6 +27,7 @@ const api = {
   },
   client: {
     connect: (opts: unknown) => ipcRenderer.invoke('client:connect', opts),
+    reconnect: (id: string) => ipcRenderer.invoke('client:reconnect', id),
     list: () => ipcRenderer.invoke('client:list'),
     disconnect: (id?: string) => ipcRenderer.invoke('client:disconnect', id),
     state: (id?: string) => ipcRenderer.invoke('client:state', id),

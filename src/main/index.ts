@@ -180,6 +180,25 @@ async function startServer(): Promise<{ wsPort: number; p2pPort: number }> {
   return { wsPort: serverConfig.wsPort, p2pPort: serverConfig.p2pPort }
 }
 
+/** 持久化当前打开的连接（重启后恢复工作区选项卡） */
+function saveOpenConnections(): void {
+  local.setSetting(
+    'openConnections',
+    connections.list().map((c) => ({ host: c.host, port: c.port, username: c.username }))
+  )
+}
+
+/** 解密记住的连接密码（未记住/不可解密返回空串） */
+function rememberedPassword(host: string, port: number, username: string): string {
+  const enc = local.getConnectionPasswordByKey(host, port, username)
+  if (!enc || !safeStorage.isEncryptionAvailable()) return ''
+  try {
+    return safeStorage.decryptString(Buffer.from(enc, 'base64'))
+  } catch {
+    return ''
+  }
+}
+
 let serverConfig: ServerConfig = { ...DEFAULT_SERVER_CONFIG }
 
 function registerIpc(): void {
@@ -253,13 +272,37 @@ function registerIpc(): void {
         passwordEnc = null // 显式取消记住 → 清除旧密码
       }
       local.saveConnection(opts.host, opts.port, opts.username, passwordEnc)
+      saveOpenConnections()
       sendToAll('state:connections', connections.list())
       return info
     }
   )
+  // 重新打开历史连接（工作区「重新连接」按钮）：用记住的密码直接重连
+  ipcMain.handle('client:reconnect', async (_e, id: string) => {
+    const info = connections.get(id)
+    if (!info) throw new Error('连接不存在')
+    if (connections.list().find((c) => c.id === id)?.state === 'connected') {
+      return info
+    }
+    const pw = rememberedPassword(info.host, info.port, info.username)
+    if (!pw) {
+      throw new Error('未记住密码，请在「新建连接」中连接一次并勾选「记住密码」')
+    }
+    const r = await connections.connect({
+      host: info.host,
+      port: info.port,
+      username: info.username,
+      password: pw,
+      id
+    })
+    saveOpenConnections()
+    sendToAll('state:connections', connections.list())
+    return r
+  })
   ipcMain.handle('client:list', () => connections.list())
   ipcMain.handle('client:disconnect', async (_e, id: string) => {
     const ok = await connections.disconnect(id)
+    saveOpenConnections()
     sendToAll('state:connections', connections.list())
     return ok
   })
@@ -476,6 +519,23 @@ app.whenReady().then(() => {
   createFloater()
   createMainWindow()
   createTray()
+
+  // 恢复上次的工作区连接：记住密码的自动重连，否则以未连接选项卡呈现（可点「重新连接」）
+  const savedConns = local.getSetting<Array<{ host: string; port: number; username: string }>>(
+    'openConnections',
+    []
+  )
+  for (const c of savedConns) {
+    const info = connections.addInactive(c)
+    const pw = rememberedPassword(c.host, c.port, c.username)
+    if (pw) {
+      void connections
+        .connect({ host: c.host, port: c.port, username: c.username, password: pw, id: info.id })
+        .catch(() => {})
+    }
+  }
+  saveOpenConnections()
+  sendToAll('state:connections', connections.list())
 
   // 若之前开启了服务端，自动启动
   if (local.getSetting<boolean>('serverAutoStart', false)) {

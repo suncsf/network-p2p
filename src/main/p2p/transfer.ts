@@ -38,6 +38,10 @@ export class FrameParser {
         this.buffer = Buffer.alloc(0)
         throw new Error('P2P magic 校验失败')
       }
+      if (header.version !== P2P_VERSION) {
+        this.buffer = Buffer.alloc(0)
+        throw new Error(`P2P 协议版本不匹配（本端 v${P2P_VERSION}，对端 v${header.version}），请两端都更新到同一版本`)
+      }
       if (header.length > MAX_FRAME_SIZE) throw new Error('P2P 帧过大')
       if (this.buffer.length < 12 + header.length) return
       const payload = this.buffer.subarray(12, 12 + header.length)
@@ -64,10 +68,11 @@ export function encodeManifest(m: P2PManifest): Buffer {
 }
 
 export function encodeChunk(fileId: number, offset: number, data: Uint8Array): Buffer {
-  const buf = Buffer.alloc(8 + data.length)
+  // v2：偏移量用 BigUInt64，文件可超过 4GB（UInt32 上限 4294967295，越界抛 RangeError 导致中断）
+  const buf = Buffer.alloc(12 + data.length)
   buf.writeUInt32BE(fileId, 0)
-  buf.writeUInt32BE(offset, 4)
-  buf.set(data, 8)
+  buf.writeBigUInt64BE(BigInt(offset), 4)
+  buf.set(data, 12)
   return buf
 }
 
@@ -132,7 +137,8 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
       recvOffsets = d.offsets ?? {}
       decide(d.accepted)
     } else if (type === P2PFrameType.ACK) {
-      if (payload.length >= 12) acked += payload.readUInt32BE(8)
+      // v2 ACK：fileId(4) + offset(BigUInt64) + length(4) = 16 字节
+      if (payload.length >= 16) acked += payload.readUInt32BE(12)
       opts.onProgress?.(acked, total)
     } else if (type === P2PFrameType.ERROR) {
       try {
@@ -359,9 +365,10 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
         }
         case P2PFrameType.CHUNK: {
           if (!manifest || !accepted) return
+          // v2 CHUNK：fileId(4) + offset(BigUInt64) + data
           const fileId = payload.readUInt32BE(0)
-          const offset = payload.readUInt32BE(4)
-          const data = payload.subarray(8)
+          const offset = Number(payload.readBigUInt64BE(4))
+          const data = payload.subarray(12)
           let fh = writers.get(fileId)
           if (!fh) {
             const file = manifest.files.find((f) => f.id === fileId)
@@ -386,10 +393,11 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
           received += data.length
           opts.onProgress?.(received, manifest.totalSize, sessionId)
           if (!socket.destroyed) {
-            const ack = Buffer.alloc(12)
+            // v2 ACK：fileId(4) + offset(BigUInt64) + length(4)
+            const ack = Buffer.alloc(16)
             ack.writeUInt32BE(fileId, 0)
-            ack.writeUInt32BE(offset, 4)
-            ack.writeUInt32BE(data.length, 8)
+            ack.writeBigUInt64BE(BigInt(offset), 4)
+            ack.writeUInt32BE(data.length, 12)
             await writeFrame(socket, P2PFrameType.ACK, ack).catch(() => {})
           }
           break

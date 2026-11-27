@@ -7,7 +7,17 @@
       show-icon
       :closable="false"
       class="state-alert"
-    />
+    >
+      <el-button
+        v-if="connection.state === 'idle' || connection.state === 'error'"
+        size="small"
+        type="primary"
+        :loading="reconnecting"
+        @click="reconnect"
+      >
+        重新连接
+      </el-button>
+    </el-alert>
 
     <div v-else class="session-inner">
       <el-radio-group v-model="tab" size="default" class="sub-tabs">
@@ -27,14 +37,27 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { ConnectionInfo, FileRootGrant } from '@shared/protocol'
 import FilesView from './FilesView.vue'
 import TransfersView from './TransfersView.vue'
 
 const props = defineProps<{ connection: ConnectionInfo }>()
 const tab = ref('files')
+const reconnecting = ref(false)
 
 const grants = computed<FileRootGrant[]>(() => props.connection.login?.grants ?? [])
+
+async function reconnect(): Promise<void> {
+  reconnecting.value = true
+  try {
+    await window.api.client.reconnect(props.connection.id)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    reconnecting.value = false
+  }
+}
 
 const stateText = computed(() => {
   switch (props.connection.state) {

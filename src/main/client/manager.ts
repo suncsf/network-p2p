@@ -34,6 +34,12 @@ export class ConnectionManager {
     id?: string
   }): Promise<ConnectionInfo> {
     const id = opts.id ?? randomUUID()
+    // 同 id 重连：先废弃旧 client（保留 info，失败时选项卡不消失）
+    const old = this.clients.get(id)
+    if (old) {
+      this.clients.delete(id)
+      old.disconnect().catch(() => {})
+    }
     const client = new LatticeClient(
       (state: ConnectionState, error?: string) => {
         const info = this.infos.get(id)
@@ -64,14 +70,34 @@ export class ConnectionManager {
       this.infos.set(id, info)
       return { ...info }
     } catch (e) {
-      // 清理失败的客户端，避免残留自动重连
+      // 清理失败的客户端，避免残留自动重连；已存在的选项卡标记为错误态
       try {
         await client.disconnect()
       } catch {
         /* ignore */
       }
+      const prev = this.infos.get(id)
+      if (prev) {
+        prev.state = 'error'
+        prev.error = (e as Error).message
+        this.onState({ ...prev })
+      }
       throw e
     }
+  }
+
+  /** 注册一个未连接的连接（启动时恢复历史连接选项卡；不建立 socket） */
+  addInactive(p: { id?: string; host: string; port: number; username: string }): ConnectionInfo {
+    const id = p.id ?? randomUUID()
+    const info: ConnectionInfo = {
+      id,
+      host: p.host,
+      port: p.port,
+      username: p.username,
+      state: 'idle'
+    }
+    this.infos.set(id, info)
+    return { ...info }
   }
 
   request<T = unknown>(id: string, method: string, params: Record<string, unknown> = {}): Promise<T> {

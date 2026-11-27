@@ -10,7 +10,8 @@ export enum P2PFrameType {
 }
 
 export const P2P_MAGIC = 0x4c4154 // "LAT"
-export const P2P_VERSION = 1
+/** v2：CHUNK/ACK 帧偏移量由 UInt32 改为 BigUInt64，支持 >4GB 文件 */
+export const P2P_VERSION = 2
 /** 单帧载荷最大值 1MB */
 export const MAX_FRAME_SIZE = 1024 * 1024
 /** 默认分块大小 64KB */

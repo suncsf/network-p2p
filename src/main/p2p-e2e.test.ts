@@ -5,7 +5,7 @@ import path from 'node:path'
 import { openDatabase } from '../main/server/db'
 import { LatticeServer } from '../main/server/service'
 import { LatticeClient } from '../main/client/client'
-import { sendFiles } from '../main/p2p/transfer'
+import { sendFiles, encodeChunk } from '../main/p2p/transfer'
 import { maskFromNames } from '@shared/permissions'
 import type { TransferGrantResult } from '@shared/protocol'
 
@@ -66,6 +66,14 @@ afterAll(async () => {
 })
 
 describe('P2P 端到端（授权 + 动态目录 + 自动接收）', () => {
+  it('CHUNK 偏移量支持 >4GB（v2 BigUInt64 编码，回归：UInt32 在 4G 越界中断）', () => {
+    const bigOffset = 2 ** 32 + 65536 // 4GB + 64KB
+    const buf = encodeChunk(1, bigOffset, Buffer.alloc(8, 1))
+    expect(buf.readUInt32BE(0)).toBe(1)
+    expect(Number(buf.readBigUInt64BE(4))).toBe(bigOffset)
+    expect(buf.length).toBe(20)
+  })
+
   it('通过 transferGrant 后接收端写入授权目录', async () => {
     // 1) 向服务端申请接收授权（目标是 sharedB）
     const grant = await client.request<TransferGrantResult>('transferGrant', {

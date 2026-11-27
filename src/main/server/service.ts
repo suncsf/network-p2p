@@ -573,7 +573,8 @@ export class LatticeServer {
     const existing = this.store?.getBySession(p.sessionId).find((r) => r.kind === 'p2p-send')
     let recId: number | undefined
     if (existing && existing.state !== 'completed') {
-      if (existing.state === 'active') {
+      // 仅当确有活跃推送任务时才算冲突；「已标记 active 但任务不在」是续传流程预置的状态，放行
+      if (existing.state === 'active' && this.pushJobs.has(p.sessionId)) {
         throw Object.assign(new Error('该传输正在进行中'), { code: 'CONFLICT' as const })
       }
       this.store?.update(existing.id, { state: 'active', error: null, transferred: 0, total })

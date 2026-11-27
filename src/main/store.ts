@@ -152,6 +152,14 @@ export class LocalStore {
     return row?.password ?? null
   }
 
+  /** 按主机/端口/账号查记住的密码密文（重连用） */
+  getConnectionPasswordByKey(host: string, port: number, username: string): string | null {
+    const row = this.db
+      .prepare('SELECT password FROM connections WHERE host = ? AND port = ? AND username = ?')
+      .get(host, port, username) as { password: string | null } | undefined
+    return row?.password ?? null
+  }
+
   removeConnection(id: number): void {
     this.db.prepare('DELETE FROM connections WHERE id = ?').run(id)
   }
