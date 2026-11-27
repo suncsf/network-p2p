@@ -249,6 +249,7 @@ function registerIpc(): void {
   ipcMain.handle('accounts:setEnabled', (_e, p: { id: number; enabled: boolean }) =>
     server.accountRepo.setEnabled(p.id, p.enabled)
   )
+  ipcMain.handle('accounts:unlock', (_e, id: number) => server.accountRepo.unlock(id))
   ipcMain.handle('accounts:generatePassword', (_e, len?: number) => generatePassword(len ?? 16))
   ipcMain.handle('grants:add', (_e, p: { accountId: number; rootPath: string; label: string; defaultMask: number }) =>
     server.accountRepo.addGrant(p.accountId, p.rootPath, p.label, p.defaultMask)

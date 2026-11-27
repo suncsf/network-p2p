@@ -39,7 +39,9 @@
                 <b>{{ a.username }}</b>
                 <el-tag v-if="!a.enabled" type="info" size="small">已禁用</el-tag>
                 <el-tag v-if="a.isAdmin" type="warning" size="small">管理员</el-tag>
+                <el-tag v-if="a.lockedUntil > Date.now()" type="danger" size="small">已锁定</el-tag>
                 <span class="spacer"></span>
+                <el-button v-if="a.lockedUntil > Date.now()" size="small" type="warning" @click.stop="unlock(a)">解锁</el-button>
                 <el-button size="small" @click.stop="toggleEnabled(a)">{{ a.enabled ? '禁用' : '启用' }}</el-button>
                 <el-button size="small" @click.stop="resetPassword(a)">重置密码</el-button>
                 <el-button size="small" type="danger" @click.stop="deleteAccount(a)">删除</el-button>
@@ -254,6 +256,12 @@ async function createAccount(): Promise<void> {
 
 async function toggleEnabled(a: AccountView): Promise<void> {
   await window.api.accounts.setEnabled({ id: a.id, enabled: !a.enabled })
+  loadAccounts()
+}
+
+async function unlock(a: AccountView): Promise<void> {
+  await window.api.accounts.unlock(a.id)
+  ElMessage.success(`已解锁 ${a.username}`)
   loadAccounts()
 }
 

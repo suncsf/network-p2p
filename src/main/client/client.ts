@@ -21,6 +21,8 @@ export class LatticeClient {
   private reconnectTimer?: NodeJS.Timeout
   private reconnectDelay = 1000
   private manualClose = false
+  /** 鉴权类失败（密码错/锁定/禁用）：重试无意义且会反复触发账户锁定，禁止自动重连 */
+  private noRetry = false
   private heartbeatTimer?: NodeJS.Timeout
 
   token?: string
@@ -43,6 +45,7 @@ export class LatticeClient {
   connect(opts: ClientOptions): Promise<LoginResult> {
     this.opts = opts
     this.manualClose = false
+    this.noRetry = false
     return this.doConnect(true)
   }
 
@@ -54,7 +57,7 @@ export class LatticeClient {
       this.ws = ws
 
       const fail = (err: Error): void => {
-        if (first) reject(err)
+        if (first || this.noRetry) reject(err)
         else this.scheduleReconnect()
       }
 
@@ -74,7 +77,14 @@ export class LatticeClient {
           resolve(result)
         } catch (e) {
           ws.close()
-          reject(e as Error)
+          const err = e as Error & { code?: string }
+          // 鉴权类失败：停止重连，保留错误状态供 UI 展示与手动处理
+          if (['UNAUTHORIZED', 'LOCKED', 'FORBIDDEN'].includes(err.code ?? '')) {
+            this.noRetry = true
+            this.manualClose = true
+            this.setState('error', err.message)
+          }
+          reject(err)
         }
       })
 
@@ -84,7 +94,7 @@ export class LatticeClient {
         for (const p of this.pending.values()) p.reject(new Error('连接已断开'))
         this.pending.clear()
         if (this.manualClose) {
-          this.setState('idle')
+          this.setState(this.noRetry ? 'error' : 'idle')
           return
         }
         this.setState('reconnecting')
@@ -94,7 +104,7 @@ export class LatticeClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.manualClose || !this.opts) return
+    if (this.manualClose || this.noRetry || !this.opts) return
     clearTimeout(this.reconnectTimer)
     this.reconnectTimer = setTimeout(() => {
       this.doConnect(false).catch(() => this.scheduleReconnect())

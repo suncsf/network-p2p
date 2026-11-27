@@ -15,6 +15,7 @@ const api = {
     delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
     setPassword: (p: unknown) => ipcRenderer.invoke('accounts:setPassword', p),
     setEnabled: (p: unknown) => ipcRenderer.invoke('accounts:setEnabled', p),
+    unlock: (id: number) => ipcRenderer.invoke('accounts:unlock', id),
     generatePassword: (len?: number) => ipcRenderer.invoke('accounts:generatePassword', len)
   },
   grants: {

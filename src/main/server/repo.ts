@@ -92,6 +92,11 @@ export class AccountRepo {
       .run(id)
   }
 
+  /** 管理员手动解锁（清除失败计数与锁定时间） */
+  unlock(id: number): void {
+    this.clearFailures(id)
+  }
+
   /* ------------------------- 授权目录 ------------------------- */
 
   addGrant(
