@@ -218,7 +218,8 @@ function etaOf(r: TransferRecord): string {
 const KIND_META: Record<string, { label: string; type: 'primary' | 'success' | 'warning' }> = {
   upload: { label: '上传', type: 'primary' },
   'p2p-send': { label: 'P2P 发送', type: 'warning' },
-  'p2p-recv': { label: 'P2P 接收', type: 'success' }
+  'p2p-recv': { label: 'P2P 接收', type: 'success' },
+  'ws-recv': { label: '接收', type: 'success' }
 }
 
 function kindMeta(k: string): { label: string; type: 'primary' | 'success' | 'warning' } {

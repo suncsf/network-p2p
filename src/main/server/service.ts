@@ -69,6 +69,8 @@ export class LatticeServer {
   private pushPct = new Map<string, number>()
   /** 接收中的 socket（sessionId → socket），支持接收端主动中止 */
   private recvSockets = new Map<string, net.Socket>()
+  /** WS 上传（对方推送）进度回写映射：uploadId → 传输记录 id */
+  private uploadRecs = new Map<string, number>()
   private accounts: AccountRepo
   private audit: AuditRepo
   private settings: SettingsRepo
@@ -174,9 +176,11 @@ export class LatticeServer {
         const g = this.transferGrants.get(info.sessionId)
         if (!g) return false
         const rec = this.store?.getBySession(info.sessionId).find((r) => r.kind === 'p2p-recv')
-        // 本机用户主动发起的下载：发起时已选好保存位置，直接放行（确认权在对端服务端）
+        const from = g.accountId > 0 ? this.sessionUsername(g.accountId) : 'P2P 对端'
+        // 授权时已确认过（本机发起的下载 / transferGrant 接收方向）：直接放行
         if (g.preAuthorized) {
           if (rec) this.store?.update(rec.id, { total: info.totalSize })
+          else this.createRecvRecord(g, from, info)
           return true
         }
         // 断点续传：同会话记录存在且非进行中 → 沿用既有授权，免二次确认
@@ -184,7 +188,6 @@ export class LatticeServer {
           this.store?.update(rec.id, { state: 'active', error: null, total: info.totalSize })
           return true
         }
-        const from = g.accountId > 0 ? this.sessionUsername(g.accountId) : 'P2P 对端'
         const ok = await this.transfers.request({
           sessionId: info.sessionId,
           from,
@@ -195,7 +198,9 @@ export class LatticeServer {
         if (rec) {
           if (ok) this.store?.update(rec.id, { total: info.totalSize })
           else this.store?.update(rec.id, { state: 'cancelled', error: '已拒绝或确认超时' })
-        } else if (!ok) {
+        } else if (ok) {
+          this.createRecvRecord(g, from, info)
+        } else {
           this.broadcast({ event: 'transfer:progress', data: { sessionId: info.sessionId, cancelled: true } })
         }
         return ok
@@ -426,18 +431,59 @@ export class LatticeServer {
             throw Object.assign(new Error('对方拒绝或确认超时'), { code: 'FORBIDDEN' })
           }
           const r = await ops.createUpload(p.root, p.path)
+          // 对方推送落接收记录：传输面板可见、有进度；对端取消/断连会同步状态
+          const rec = this.store?.create({
+            kind: 'ws-recv',
+            peer: s.username,
+            name: basename(p.path) || p.path,
+            remotePath: p.path,
+            localPath: ops.resolvePath(p.root, p.path),
+            total: Number(p.size ?? 0),
+            state: 'active'
+          })
+          if (rec) {
+            this.uploadRecs.set(r.uploadId, rec.id)
+            // 连接在完成前断开：记录标记为已中断
+            socket.once('close', () => {
+              const id = this.uploadRecs.get(r.uploadId)
+              if (id === undefined) return
+              this.uploadRecs.delete(r.uploadId)
+              const cur = this.store?.get(id)
+              if (cur && cur.state === 'active') {
+                this.store?.update(id, { state: 'interrupted', error: '连接中断' })
+              }
+            })
+          }
           this.reply(socket, req.id, true, r)
           break
         }
-        case 'uploadChunk':
+        case 'uploadChunk': {
           await ops.appendUpload(p.uploadId, p.offset, p.data)
+          const recId = this.uploadRecs.get(p.uploadId)
+          if (recId !== undefined) {
+            // base64 长度换算落盘字节数（含 padding 修正），回写接收进度
+            const decoded =
+              Math.floor((p.data.length * 3) / 4) - (p.data.endsWith('==') ? 2 : p.data.endsWith('=') ? 1 : 0)
+            const cur = this.store?.get(recId)
+            if (cur && cur.state === 'active') {
+              this.store?.updateProgress(recId, p.offset + decoded, cur.total)
+            }
+          }
           this.reply(socket, req.id, true, {})
           break
-        case 'uploadFinish':
+        }
+        case 'uploadFinish': {
           await ops.finishUpload(p.uploadId)
+          const recId = this.uploadRecs.get(p.uploadId)
+          if (recId !== undefined) {
+            this.uploadRecs.delete(p.uploadId)
+            const cur = this.store?.get(recId)
+            if (cur && cur.state === 'active') this.store?.update(recId, { state: 'completed', error: null })
+          }
           this.audit.log(s.username, 'upload', { root: p.root, path: p.path })
           this.reply(socket, req.id, true, {})
           break
+        }
         case 'transferGrant':
           await this.handleTransferGrant(s, socket, req)
           break
@@ -457,10 +503,19 @@ export class LatticeServer {
           this.reply(socket, req.id, true, {})
           break
         }
-        case 'uploadAbort':
+        case 'uploadAbort': {
           await ops.abortUpload((req.params as { uploadId: string }).uploadId)
+          const recId = this.uploadRecs.get(p.uploadId)
+          if (recId !== undefined) {
+            this.uploadRecs.delete(p.uploadId)
+            const cur = this.store?.get(recId)
+            if (cur && cur.state === 'active') {
+              this.store?.update(recId, { state: 'cancelled', error: '对方取消了传输' })
+            }
+          }
           this.reply(socket, req.id, true, {})
           break
+        }
         case 'transferDecision':
           this.handleDecision(s, socket, req)
           break
@@ -866,6 +921,28 @@ export class LatticeServer {
       )
     })().catch(() => {
       /* 状态已在 executePush 内落库并广播 */
+    })
+  }
+
+  /**
+   * 接受推送后补建 P2P 接收记录（本机发起的下载在 prepareReceive 时已预建，不会走到这里）。
+   * resume 上下文保留接收目录：续传握手时 validateToken 的 resume 兜底分支读取 ctx.dir 重建授权。
+   */
+  private createRecvRecord(
+    g: TransferGrantRecord,
+    from: string,
+    info: { fileName: string; fileCount: number; totalSize: number; sessionId: string }
+  ): void {
+    this.store?.create({
+      kind: 'p2p-recv',
+      peer: from,
+      name: basename(info.fileName) || '传输',
+      remotePath: info.fileName,
+      localPath: g.root,
+      total: info.totalSize,
+      state: 'active',
+      sessionId: info.sessionId,
+      resume: JSON.stringify({ dir: g.root })
     })
   }
 

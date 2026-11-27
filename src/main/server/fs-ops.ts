@@ -72,6 +72,11 @@ export class FileOps {
     return resolveRealPathWithinRoot(g.root, absolute)
   }
 
+  /** 解析目标保存位置的绝对路径（供传输记录展示，不做存在性校验） */
+  resolvePath(rootPath: string, relPath: string): string {
+    return this.abs(rootPath, relPath)
+  }
+
   async list(rootPath: string, relPath: string): Promise<FileEntry[]> {
     this.checker.require(rootPath, relPath, Permission.READ)
     const g = this.root(rootPath)

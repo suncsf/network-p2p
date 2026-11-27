@@ -210,8 +210,8 @@ export interface TransferProgressEvent {
 /** 传输记录状态：进行中 / 已完成 / 已取消 / 已中断（可断点续传） */
 export type TransferState = 'active' | 'completed' | 'cancelled' | 'interrupted'
 
-/** 传输记录类型：分块上传 / P2P 发送端 / P2P 接收端 */
-export type TransferKind = 'upload' | 'p2p-send' | 'p2p-recv'
+/** 传输记录类型：分块上传 / P2P 发送端 / P2P 接收端 / WS 接收（对方推送到本机共享目录） */
+export type TransferKind = 'upload' | 'p2p-send' | 'p2p-recv' | 'ws-recv'
 
 /** 统一传输面板的一条记录（持久化在 local.db） */
 export interface TransferRecord {

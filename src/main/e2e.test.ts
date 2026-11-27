@@ -6,6 +6,8 @@ import { openDatabase } from '../main/server/db'
 import { LatticeServer } from '../main/server/service'
 import { LatticeClient } from '../main/client/client'
 import { sendFiles, createReceiveServer } from '../main/p2p/transfer'
+import { LocalStore } from '../main/store'
+import { TransferStore } from '../main/transfers'
 import { Permission, maskFromNames } from '@shared/permissions'
 
 let root: string
@@ -13,6 +15,7 @@ let dbFile: string
 let shared: string
 let server: LatticeServer
 let client: LatticeClient
+let store: TransferStore
 let login: import('@shared/protocol').LoginResult
 let db: ReturnType<typeof openDatabase>
 const WS_PORT = 47201
@@ -27,6 +30,9 @@ beforeAll(async () => {
 
   dbFile = path.join(root, 'server.db')
   db = openDatabase(dbFile)
+  // 与生产同构：先跑 local.db 迁移建 transfers 表，再挂传输记录存储
+  new LocalStore(db)
+  store = new TransferStore(db)
   server = new LatticeServer(db, {
     wsPort: WS_PORT,
     p2pPort: P2P_PORT,
@@ -34,7 +40,7 @@ beforeAll(async () => {
     autoAccept: true,
     lockAfter: 5,
     lockMs: 60000
-  })
+  }, store)
 
   const accId = server.accountRepo.create('alice', 'secret123')
   server.accountRepo.addGrant(
@@ -186,5 +192,51 @@ describe('P2P 传输', () => {
     } finally {
       await new Promise<void>((r) => recv.close(() => r()))
     }
+  })
+})
+
+describe('接收传输记录（对方推送在传输面板可见）', () => {
+  it('WS 上传接收：落 ws-recv 记录，进度回写，完成后标记 completed', async () => {
+    const data = Buffer.from('ws-recv-record-check')
+    const init = await client.request<{ uploadId: string }>('uploadInit', {
+      root: shared,
+      path: 'ws-recv.txt',
+      size: data.length
+    })
+    await client.request('uploadChunk', {
+      uploadId: init.uploadId,
+      offset: 0,
+      data: data.toString('base64')
+    })
+    await client.request('uploadFinish', { uploadId: init.uploadId })
+    const rec = store.list().find((r) => r.kind === 'ws-recv' && r.name === 'ws-recv.txt')
+    expect(rec).toBeDefined()
+    expect(rec?.state).toBe('completed')
+    expect(rec?.transferred).toBe(data.length)
+    expect(rec?.total).toBe(data.length)
+    expect(rec?.peer).toBe('alice')
+    expect(rec?.localPath).toBeTruthy()
+    expect(existsSync(path.join(shared, 'ws-recv.txt'))).toBe(true)
+  })
+
+  it('P2P 对端推送：接受后落 p2p-recv 记录并完成', async () => {
+    const srcFile = path.join(root, 'push-src.txt')
+    writeFileSync(srcFile, 'push-me')
+    const grant = server.createLocalTransferGrant(shared)
+    await sendFiles({
+      host: '127.0.0.1',
+      port: P2P_PORT,
+      token: grant.p2pToken,
+      sessionId: grant.sessionId,
+      files: [{ id: 1, absPath: srcFile, relPath: 'push-src.txt' }]
+    })
+    // 等待接收端落盘与记录回写
+    await new Promise((r) => setTimeout(r, 300))
+    const rec = store.getBySession(grant.sessionId).find((r) => r.kind === 'p2p-recv')
+    expect(rec).toBeDefined()
+    expect(rec?.state).toBe('completed')
+    expect(rec?.peer).toBe('P2P 对端')
+    expect(rec?.localPath).toBe(shared)
+    expect(readFileSync(path.join(shared, 'push-src.txt'), 'utf8')).toBe('push-me')
   })
 })
