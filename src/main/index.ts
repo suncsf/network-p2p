@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, Notification, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, Notification, nativeImage, safeStorage, screen } from 'electron'
 import { join, dirname, basename } from 'path'
 import { existsSync } from 'fs'
 import { openDatabase, type Db } from './server/db'
@@ -243,9 +243,16 @@ function registerIpc(): void {
   // 客户端（多连接）
   ipcMain.handle(
     'client:connect',
-    async (_e, opts: { host: string; port: number; username: string; password: string }) => {
+    async (_e, opts: { host: string; port: number; username: string; password: string; rememberPassword?: boolean }) => {
       const info = await connections.connect(opts)
-      local.saveConnection(opts.host, opts.port, opts.username)
+      // 记住连接参数：密码用 safeStorage 加密后落库（Windows DPAPI / Linux libsecret）
+      let passwordEnc: string | null | undefined
+      if (opts.rememberPassword && opts.password && safeStorage.isEncryptionAvailable()) {
+        passwordEnc = safeStorage.encryptString(opts.password).toString('base64')
+      } else if (opts.rememberPassword === false) {
+        passwordEnc = null // 显式取消记住 → 清除旧密码
+      }
+      local.saveConnection(opts.host, opts.port, opts.username, passwordEnc)
       sendToAll('state:connections', connections.list())
       return info
     }
@@ -342,6 +349,17 @@ function registerIpc(): void {
   // 连接历史
   ipcMain.handle('history:list', () => local.listConnections())
   ipcMain.handle('history:remove', (_e, id: number) => local.removeConnection(id))
+  // 取回历史连接记住的密码（safeStorage 解密；未记住/不可解密返回空串）
+  ipcMain.handle('history:getPassword', (_e, id: number): string => {
+    const enc = local.getConnectionPassword(id)
+    if (!enc) return ''
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return ''
+      return safeStorage.decryptString(Buffer.from(enc, 'base64'))
+    } catch {
+      return ''
+    }
+  })
 
   // 窗口
   ipcMain.handle('window:openMain', () => createMainWindow())

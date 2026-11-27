@@ -118,6 +118,8 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
   // 等待接收方对 MANIFEST 的确认（DECISION），确认后才推流分块
   let rejectReason = '接收方拒绝或连接已断开'
   let recvOffsets: Record<number, number> = {}
+  /** 对端已确认落盘的字节数（含续传基线）——进度以此为准，与接收端显示一致 */
+  let acked = 0
   let decide!: (ok: boolean) => void
   const decided = new Promise<boolean>((resolve) => (decide = resolve))
   const parser = new FrameParser((type, payload) => {
@@ -129,6 +131,9 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
       }
       recvOffsets = d.offsets ?? {}
       decide(d.accepted)
+    } else if (type === P2PFrameType.ACK) {
+      if (payload.length >= 12) acked += payload.readUInt32BE(8)
+      opts.onProgress?.(acked, total)
     } else if (type === P2PFrameType.ERROR) {
       try {
         const e = JSON.parse(payload.toString('utf8')) as { message?: string }
@@ -166,13 +171,12 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
     throw new Error(rejectReason)
   }
 
-  // 断点续传：接收端已收到的字节数作为起点
-  let transferred = 0
+  // 断点续传：对端已收到的字节数作为进度基线
   for (const f of opts.files) {
     const size = sizes.get(f.id) ?? 0
-    const start = Math.max(0, Math.min(recvOffsets[f.id] ?? 0, size))
-    transferred += start
+    acked += Math.max(0, Math.min(recvOffsets[f.id] ?? 0, size))
   }
+  opts.onProgress?.(acked, total)
   for (const f of opts.files) {
     const size = sizes.get(f.id) ?? 0
     let offset = Math.max(0, Math.min(recvOffsets[f.id] ?? 0, size))
@@ -189,8 +193,6 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
         await fh.read(buf, 0, len, offset)
         await writeFrame(socket, P2PFrameType.CHUNK, encodeChunk(f.id, offset, buf))
         offset += len
-        transferred += len
-        opts.onProgress?.(transferred, total)
       }
     } finally {
       await fh.close()
@@ -321,6 +323,11 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
                 offsets.set(f.id, 0)
               }
             }
+            // 已有字节计入进度基线，与发送端显示一致
+            let base = 0
+            for (const v of offsets.values()) base += v
+            received += base
+            opts.onProgress?.(received, manifest.totalSize, sessionId)
           }
           const first = manifest.files[0]
           const acceptedResult = await opts.requestConfirm({

@@ -48,6 +48,13 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_transfers_state ON transfers(state);
       CREATE INDEX IF NOT EXISTS idx_transfers_session ON transfers(session_id);
     `
+  },
+  {
+    version: 3,
+    // 记住连接密码：存 safeStorage 加密后的 base64 密文（Windows DPAPI / Linux libsecret）
+    sql: `
+      ALTER TABLE connections ADD COLUMN password TEXT;
+    `
   }
 ]
 
@@ -97,26 +104,52 @@ export class LocalStore {
       .run(key, JSON.stringify(value))
   }
 
-  listConnections(): Array<{ id: number; host: string; port: number; username: string; lastUsed: number }> {
+  listConnections(): Array<{
+    id: number
+    host: string
+    port: number
+    username: string
+    lastUsed: number
+    hasPassword: boolean
+  }> {
     const rows = this.db
       .prepare('SELECT * FROM connections ORDER BY last_used DESC')
-      .all() as Array<{ id: number; host: string; port: number; username: string; last_used: number }>
+      .all() as Array<{
+      id: number
+      host: string
+      port: string
+      username: string
+      last_used: number
+      password: string | null
+    }>
     return rows.map((r) => ({
       id: r.id,
       host: r.host,
-      port: r.port,
+      port: Number(r.port),
       username: r.username,
-      lastUsed: r.last_used
+      lastUsed: r.last_used,
+      hasPassword: !!r.password
     }))
   }
 
-  saveConnection(host: string, port: number, username: string): void {
+  saveConnection(host: string, port: number, username: string, passwordEnc?: string | null): void {
     this.db
       .prepare(
-        'INSERT INTO connections (host, port, username, last_used) VALUES (?,?,?,?) ' +
-          'ON CONFLICT(host, port, username) DO UPDATE SET last_used = excluded.last_used'
+        'INSERT INTO connections (host, port, username, password, last_used) VALUES (?,?,?,?,?) ' +
+          'ON CONFLICT(host, port, username) DO UPDATE SET ' +
+          'last_used = excluded.last_used' +
+          // 未传密码时保留旧值；显式传空串表示清除
+          (passwordEnc === undefined ? '' : ', password = excluded.password')
       )
-      .run(host, port, username, Date.now())
+      .run(host, port, username, passwordEnc ?? null, Date.now())
+  }
+
+  /** 读取历史连接的加密密码密文（由主进程用 safeStorage 解密） */
+  getConnectionPassword(id: number): string | null {
+    const row = this.db.prepare('SELECT password FROM connections WHERE id = ?').get(id) as
+      | { password: string | null }
+      | undefined
+    return row?.password ?? null
   }
 
   removeConnection(id: number): void {

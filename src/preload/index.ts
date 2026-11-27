@@ -51,7 +51,8 @@ const api = {
   },
   history: {
     list: () => ipcRenderer.invoke('history:list'),
-    remove: (id: number) => ipcRenderer.invoke('history:remove', id)
+    remove: (id: number) => ipcRenderer.invoke('history:remove', id),
+    getPassword: (id: number) => ipcRenderer.invoke('history:getPassword', id)
   },
   window: {
     openMain: () => ipcRenderer.invoke('window:openMain'),

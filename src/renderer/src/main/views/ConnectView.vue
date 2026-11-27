@@ -20,6 +20,9 @@
         <el-form-item label="密码">
           <el-input v-model="form.password" type="password" show-password placeholder="密码" />
         </el-form-item>
+        <el-form-item label=" ">
+          <el-checkbox v-model="form.rememberPassword">记住密码</el-checkbox>
+        </el-form-item>
         <el-form-item v-if="error" label=" ">
           <el-alert :title="error" type="error" show-icon :closable="false" />
         </el-form-item>
@@ -49,15 +52,17 @@ import type { FileRootGrant, LoginResult } from '@shared/protocol'
 
 const emit = defineEmits<{ connected: [grants: FileRootGrant[]] }>()
 
-const form = reactive({ host: '127.0.0.1', port: 47100, username: '', password: '' })
+const form = reactive({ host: '127.0.0.1', port: 47100, username: '', password: '', rememberPassword: true })
 const loading = ref(false)
 const error = ref('')
-const history = ref<Array<{ id: number; host: string; port: number; username: string }>>([])
+const history = ref<Array<{ id: number; host: string; port: number; username: string; hasPassword: boolean }>>([])
 
-function fill(h: { host: string; port: number; username: string }): void {
+async function fill(h: { id: number; host: string; port: number; username: string; hasPassword: boolean }): Promise<void> {
   form.host = h.host
   form.port = h.port
   form.username = h.username
+  // 记住了密码就直接带出，免输
+  form.password = h.hasPassword ? await window.api.history.getPassword(h.id) : ''
 }
 
 async function submit(): Promise<void> {
@@ -88,7 +93,11 @@ async function remove(id: number): Promise<void> {
   await loadHistory()
 }
 
-onMounted(loadHistory)
+onMounted(async () => {
+  await loadHistory()
+  // 打开表单即自动填入最近一次连接的参数（含记住的密码）
+  if (history.value.length > 0) await fill(history.value[0])
+})
 </script>
 
 <style scoped>

@@ -90,13 +90,18 @@
         </el-table-column>
         <el-table-column label="进度" min-width="180">
           <template #default="{ row }">
-            <el-progress
-              v-if="row.state === 'active'"
-              :percentage="pct(row)"
-              :indeterminate="!row.total"
-              :show-text="!!row.total"
-              :stroke-width="8"
-            />
+            <template v-if="row.state === 'active'">
+              <el-progress
+                :percentage="pct(row)"
+                :indeterminate="!row.total"
+                :show-text="!!row.total"
+                :stroke-width="8"
+              />
+              <div v-if="speeds.get(row.id)" class="speed-line">
+                <span>{{ formatSize(speeds.get(row.id)!) }}/s</span>
+                <span v-if="row.total">· 剩余 {{ etaOf(row) }}</span>
+              </div>
+            </template>
             <span v-else class="size-text">
               {{ row.total ? `${formatSize(row.transferred)} / ${formatSize(row.total)}` : formatSize(row.transferred) }}
             </span>
@@ -162,6 +167,43 @@ function pct(r: TransferRecord): number {
   return Math.min(100, Math.round((r.transferred / r.total) * 100))
 }
 
+/** 每条记录的实时速度（字节/秒，EWMA 平滑） */
+const speeds = ref(new Map<number, number>())
+/** 上次采样点（非响应式） */
+const samples = new Map<number, { t: number; bytes: number }>()
+
+/** 由进度更新事件推算速度：采样间隔 ≥200ms，指数平滑去抖 */
+function trackSpeed(rec: TransferRecord): void {
+  if (rec.state !== 'active') {
+    speeds.value.delete(rec.id)
+    samples.delete(rec.id)
+    return
+  }
+  const now = Date.now()
+  const last = samples.get(rec.id)
+  if (!last || rec.transferred < last.bytes) {
+    // 首次采样或进度回退（续传重置）：重建基线
+    samples.set(rec.id, { t: now, bytes: rec.transferred })
+    if (last) speeds.value.delete(rec.id)
+    return
+  }
+  const dt = now - last.t
+  if (dt < 200) return
+  const instant = ((rec.transferred - last.bytes) / dt) * 1000
+  samples.set(rec.id, { t: now, bytes: rec.transferred })
+  const prev = speeds.value.get(rec.id)
+  speeds.value.set(rec.id, prev ? prev * 0.6 + instant * 0.4 : instant)
+}
+
+function etaOf(r: TransferRecord): string {
+  const v = speeds.value.get(r.id)
+  if (!v || !r.total) return '--'
+  const sec = Math.max(0, Math.round((r.total - r.transferred) / v))
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60}s`
+  return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`
+}
+
 const KIND_META: Record<string, { label: string; type: 'primary' | 'success' | 'warning' }> = {
   upload: { label: '上传', type: 'primary' },
   'p2p-send': { label: 'P2P 发送', type: 'warning' },
@@ -199,6 +241,7 @@ const filtered = computed<TransferRecord[]>(() =>
 )
 
 function upsert(rec: TransferRecord): void {
+  trackSpeed(rec)
   const i = records.value.findIndex((r) => r.id === rec.id)
   if (i >= 0) records.value.splice(i, 1, rec)
   else records.value.unshift(rec)
@@ -236,11 +279,15 @@ async function resume(r: TransferRecord): Promise<void> {
 async function remove(r: TransferRecord): Promise<void> {
   await window.api.transfers.remove(r.id)
   records.value = records.value.filter((x) => x.id !== r.id)
+  speeds.value.delete(r.id)
+  samples.delete(r.id)
 }
 
 async function clearFinished(): Promise<void> {
   await window.api.transfers.clearFinished()
   ElMessage.success('已清除已结束的记录')
+  speeds.value.clear()
+  samples.clear()
   refresh()
 }
 
@@ -320,5 +367,12 @@ onUnmounted(() => {
 .size-text {
   font-size: 12px;
   color: #606266;
+}
+.speed-line {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+  display: flex;
+  gap: 6px;
 }
 </style>
