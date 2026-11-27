@@ -26,3 +26,13 @@ export interface AuditRow {
   action: string
   detail: string | null
 }
+
+/** 服务端当前在线连接视图（一个登录会话一条） */
+export interface ServerSessionView {
+  username: string
+  address: string
+  /** 登录时间（epoch ms） */
+  loginAt: number
+  /** 最近一次活跃时间（epoch ms） */
+  lastSeen: number
+}

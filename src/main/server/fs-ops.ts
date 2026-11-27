@@ -148,7 +148,7 @@ export class FileOps {
     return { data: buf.toString('base64'), size: buf.length }
   }
 
-  /** P2P 发送前收集文件（目录递归展开，符号链接不跟随）；要求 TRANSFER + DOWNLOAD 权限 */
+  /** P2P 上传前收集文件（目录递归展开，符号链接不跟随）；要求 TRANSFER + DOWNLOAD 权限（对方从本机下载） */
   async collectForTransfer(rootPath: string, relPath: string): Promise<Array<{ absPath: string; relPath: string }>> {
     this.checker.require(rootPath, relPath, Permission.TRANSFER)
     this.checker.require(rootPath, relPath, Permission.DOWNLOAD)
@@ -222,7 +222,7 @@ export interface UploadState {
 
 const uploadTable = new Map<string, UploadState>()
 
-/** 接收确认管理器 */
+/** 下载确认管理器 */
 export class TransferManager {
   private pending = new Map<
     string,
@@ -234,7 +234,7 @@ export class TransferManager {
     private emit: (ev: ServerEvent) => void
   ) {}
 
-  /** 运行时热更新配置（如切换自动接收），立即对后续传输生效 */
+  /** 运行时热更新配置（如切换自动下载），立即对后续传输生效 */
   update(patch: Partial<TransferServerConfig>): void {
     this.config = { ...this.config, ...patch }
   }

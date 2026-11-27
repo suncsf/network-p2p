@@ -39,6 +39,7 @@ export const FIXED_PAGE_IDS: Record<string, string> = {
 /** 固定弹窗表：'页面::弹窗' → aXXXbYYY。需要与文档/反馈对照引用的关键弹窗在此硬编码。 */
 export const FIXED_DIALOG_IDS: Record<string, string> = {
   'workspace::new-connection': 'a001b001',
+  'workspace::ip-scan': 'a001b002',
   'server::account-create': 'a002b001',
   'server::grant-add': 'a002b002',
   'server::node-permission': 'a002b003'

@@ -14,8 +14,8 @@ export const P2P_MAGIC = 0x4c4154 // "LAT"
 export const P2P_VERSION = 2
 /** 单帧载荷最大值 1MB */
 export const MAX_FRAME_SIZE = 1024 * 1024
-/** 默认分块大小 64KB */
-export const DEFAULT_CHUNK_SIZE = 64 * 1024
+/** 默认分块 512KB（载荷 = 12 字节前缀 + data ≤ MAX_FRAME_SIZE；大分块显著减少大传输的帧数与逐块开销） */
+export const DEFAULT_CHUNK_SIZE = 512 * 1024
 
 export interface P2PFrameHeader {
   magic: number

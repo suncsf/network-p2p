@@ -33,7 +33,7 @@
 | 主进程watch | [调试环境.md](调试环境.md) | electron-vite dev 默认不监听主进程，dev 脚本加 --watch（根因级教训） |
 | Electron二进制缺失 | [调试环境.md](调试环境.md) | Error: Electron uninstall → node install.js + ELECTRON_MIRROR 环境变量 |
 | 测试EPERM | [调试环境.md](调试环境.md) | Windows 删 SQLite 临时目录被占用 → 测试清理前先 db.close() |
-| git代理 | [调试环境.md](调试环境.md) | 7890 失效，实测 7897（Clash Verge）可用；直连 GitHub 不稳定 |
+| git代理 | [调试环境.md](调试环境.md) | 7890 失效，实测 7897（Clash Verge）可用；直连多次实测可通（74f02ba/d5e4073/8dd908a），代理未启动时 -c 置空 URL 级代理直连是首选 |
 | 传输菜单独立 | [传输面板独立化.md](传输面板独立化.md) | 传输面板脱离连接 tab 成侧栏独立菜单：待确认请求来自本机服务端，与连接无关 |
 | 待确认传输角标 | [传输面板独立化.md](传输面板独立化.md) | 侧栏「传输」角标：transfer:incoming 即刷 + 3s 轮询 listPending 兜底（decide/超时无事件） |
 | 已传量显示 | [传输面板独立化.md](传输面板独立化.md) | 进行中记录恒显「已传 X / Y」，接收/推送/上传统一；volumeText() |
@@ -57,6 +57,35 @@
 | pickUpload | [批量上传与多选下载.md](批量上传与多选下载.md) | dialog:pickUpload 原生多选对话框（file/dir 分开，Windows 无法混选）；上传按钮改 split-button 下拉 |
 | 批量下载 | [批量上传与多选下载.md](批量上传与多选下载.md) | 列表勾选列 + 卡片复选框，下载选中项一次 P2P 会话，对方只确认一次 |
 | 多路径推流 | [批量上传与多选下载.md](批量上传与多选下载.md) | p2pPush 新增 paths[]：collectTargets 多路径收集去重，单 manifest 推流，resumePush 支持续传 |
+| 批量上传提交推送 | [批量上传与多选下载.md](批量上传与多选下载.md) | 提交 8dd908a（含两份记忆文档）推送 GitHub：绕过失效代理直连成功 |
+| 非法路径 | [大文件续传修复.md](大文件续传修复.md) | 单选批量下载发送端续传抛 PathViolationError：paths 仅在 >1 项时落盘、path 又不存在 → collectForTransfer 收到 undefined |
+| paths续传上下文 | [大文件续传修复.md](大文件续传修复.md) | preparePush 始终存完整 targets；prepareReceive 接收记录新增 paths；接收侧续传按原 paths 重放 |
+| 批量续传丢文件 | [大文件续传修复.md](大文件续传修复.md) | 修复前多选批量续传只补第一项其余静默丢失；修复后完整重放 |
+| 对端推送续传 | [大文件续传修复.md](大文件续传修复.md) | createRecvRecord 记录无对端 root/paths，本机不可续传，明确提示请在对端续传（替代误导的「权限不足」） |
+| transfer-resume测试 | [大文件续传修复.md](大文件续传修复.md) | 新增双端真实 TransferRunner 续传回归测试 6 场景（transfer-resume.test.ts），47→53 全绿 |
+| 传输连接分离 | [大文件续传修复.md](大文件续传修复.md) | 待办需求（未实施）：传输走独立连接，关工作区连接不断传输；仅完成代码勘察 |
+| 服务端当前连接 | [服务端当前连接.md](服务端当前连接.md) | ServerView 新增「当前连接」页签：listSessions IPC 拉取 + server:event 事件驱动实时刷新 |
+| listSessions | [服务端当前连接.md](服务端当前连接.md) | LatticeServer.listSessions()：sessions 遍历返回 username/address/loginAt/lastSeen |
+| client:logout | [服务端当前连接.md](服务端当前连接.md) | socket close 时经 onLocalEvent 发断开事件；sessions.delete() 返回值防重（stop/disconnect/网络断开三路径收敛） |
+| ServerSessionView | [服务端当前连接.md](服务端当前连接.md) | shared/models.ts 新增在线会话视图类型（username/address/loginAt/lastSeen） |
+| 大文件误取消 | [大文件误取消修复.md](大文件误取消修复.md) | 50-60GB 传输无操作变「已取消」：全量 SHA-256 空转 + 授权 5 分钟过期 + p2pPush 30s 超时 + ACK 竞态四因叠加 |
+| SHA-256跳过 | [大文件误取消修复.md](大文件误取消修复.md) | 发送前不再全量哈希（接收端从不校验），只 stat 取大小，manifest sha256 留空，50GB 秒开 |
+| 授权有效期30分钟 | [大文件误取消修复.md](大文件误取消修复.md) | GRANT_TTL_MS 统一替换三处 5min 硬编码（发放×2 + 滑动续期），覆盖枚举+确认+连接握手耗时 |
+| p2pPush超时放宽 | [大文件误取消修复.md](大文件误取消修复.md) | client.request 支持按请求 timeoutMs；ConnectionManager 对 p2pPush 自动放宽到 10 分钟 |
+| onSent已写字节 | [大文件误取消修复.md](大文件误取消修复.md) | executePush 失败状态判定加入「已写入 socket 字节数」与记录已有 transferred，杜绝 ACK 竞态误标已取消丢断点 |
+| 背压保护 | [大文件误取消修复.md](大文件误取消修复.md) | 发送端 socket.bufferSize > 16MB 等 drain 再发，防对端落盘慢内存积压；大分块 512KB 降逐块开销 8 倍 |
+| 传输暂停 | [传输暂停与打开目录.md](传输暂停与打开目录.md) | 新增 paused 状态：上传挂起分块循环 / p2p-send 挂起推送任务 / p2p-recv 经 p2pPushPause 通知发送端挂起；ws-recv 不支持 |
+| p2pPushPause | [传输暂停与打开目录.md](传输暂停与打开目录.md) | 新 WS 命令对（p2pPushPause/p2pPushResume）：接收端遥控发送端挂起/恢复推流，socket 保留原地继续 |
+| 继续回退续传 | [传输暂停与打开目录.md](传输暂停与打开目录.md) | resume 优先原地唤醒，对端任务已不在自动回退完整续传；暂停前持久化断点防杀进程丢进度 |
+| 打开目录 | [传输暂停与打开目录.md](传输暂停与打开目录.md) | transfer:reveal IPC：文件 showItemInFolder 选中 / 目录 openPath / 未落盘退回父目录；p2p-send 从续传上下文还原路径 |
+| 收发叫法统一 | [收发叫法统一.md](收发叫法统一.md) | 传输方向文案统一为「下载（进本机）/上传（出本机）」：10 文件约 70 处，只改文案注释不动协议标识符 |
+| 下载策略 | [收发叫法统一.md](收发叫法统一.md) | 设置页「接收策略」更名「下载策略」、「自动接收」→「自动下载」（ServerView tooltip 同步） |
+| P2P上传 | [收发叫法统一.md](收发叫法统一.md) | 传输面板标签「P2P 发送」→「P2P 上传」（记录类型 p2p-send 不变） |
+| P2P下载 | [收发叫法统一.md](收发叫法统一.md) | 传输面板标签「P2P 接收」→「P2P 下载」、「接收」→「下载」（p2p-recv/ws-recv 不变） |
+| IP段检测 | [IP段检测.md](IP段检测.md) | 工作区连接新增 IP 段检测：识别本机网卡生成网段 → 并发探测默认端口 → 服务端返回确认数据才判「可连接」→ 双击回填表单 |
+| net-probe | [IP段检测.md](IP段检测.md) | 新建探测模块：localNics 网卡识别/CIDR 推导、expandRange 网段展开（宽掩码收敛 /24）、probeHost HTTP 探测（校验 service=v-lattice）、probeRange 每批 32 并发 |
+| 探测确认数据 | [IP段检测.md](IP段检测.md) | 服务端 HTTP server 对非 WS 升级请求返回 `{ service:'v-lattice', hostname, protocolVersion }`；只有收到确认数据才判可连接，端口开放但服务不匹配不误报 |
+| workspace::ip-scan | [IP段检测.md](IP段检测.md) | 检测弹窗固定 ID a001b002；新建连接弹窗 IP 输入框 append 槽「检测」按钮，双击可连接行回填 host/port 并关窗 |
 
 ## 当日要点
 
@@ -96,3 +125,48 @@
 - 上传多选：「上传」改 split-button 下拉（上传文件 / 上传文件夹，均可多选，Windows 无法混选故分入口）；主进程 expandSources 递归展开目录保留结构、空目录先 mkdir 补建，startUploadBatch 每文件一条记录经顺序队列逐个上传（可单独取消/续传）。
 - 下载同理：列表加勾选列、卡片加复选框，「下载选中(N)」一次 P2P 会话批量推流；p2pPush 命令新增 paths[] 多路径支持（collectTargets 去重），对方只需确认一次，断点续传同步支持多路径。
 - typecheck 0 错误、47 项测试全绿；改动未提交 git。
+
+### 第五轮（同日）
+
+- 提交并推送 `8dd908a`（批量上传与多选下载 + 两份记忆文档，12 文件 +463/-49）到 origin/main。
+- git 代理实测补充：7890 未运行时 `-c http.https://github.com.proxy=` 置空绕过直连推送成功，直连已三次实测可通；排查靠 `git config --show-origin --list | grep proxy` 定位 URL 专用代理键。
+
+### 第七轮（同日）
+
+- 修断点续传「非法路径」（发送端面板续传）：根因是单选批量下载的发送端记录续传上下文 path/paths 双空（paths 仅 >1 项时落盘），`collectForTransfer(root, undefined)` 抛 PathViolationError；preparePush 改为始终存完整 targets、空路径明确报错。
+- 顺带修两个相邻缺陷：多选批量续传只补第一项丢文件（接收记录现存完整 paths 按原样重放）；对端推送接收记录续传报误导性「权限不足」（改为明确提示请在对端续传）。
+- 新增 transfer-resume.test.ts：双端真实 TransferRunner + 双 LatticeServer 的 6 场景续传回归（上传/单文件/多选/单选/对端推送/发送端续传）。typecheck 0 错误、53 项全绿；改动未提交 git。
+- 待办：传输与工作区连接分离（传输走独立连接，关工作区连接不断传输）——需求已梳理未实施，仅完成勘察。
+
+### 第六轮（同日）
+
+- 服务端面板新增「当前连接」页签：`LatticeServer.listSessions()` + `server:listSessions` IPC + preload `api.server.listSessions`；ServerView 表格展示账户/来源地址/登录时间/最近活跃，空状态区分服务端未运行/暂无连接。
+- 断开通知补齐：socket close 发 `client:logout`（经 onLocalEvent 转发，不弹通知），`sessions.delete()` 返回值防重，disconnect RPC 与 server.stop 三路径收敛。
+- typecheck 0 错误、47 项测试全绿；改动未提交 git。
+
+### 第八轮（同日）
+
+- 修「传 50、60GB 文件/文件夹有时无操作被标已取消」，四根因：① sendFiles 连接前对全部文件全量 SHA-256（接收端从不校验）→ 50GB 空转数分钟；② 接收授权仅 5 分钟有效期，枚举+确认+哈希超时即「无效 token」→ 已取消；③ p2pPush RPC 固定 30s 超时，服务端枚举完整个文件夹才回复，大目录必超 → 渲染层 transfer:fail 标已取消；④ executePush 仅凭 ACK 判定取消/中断，断开瞬间 ACK 未达被误标已取消丢断点（S6 测试暴露）。
+- 修复：跳过发送前哈希（只 stat，sha256 留空）；授权有效期 5→30 分钟（GRANT_TTL_MS 三处统一）；client.request 支持按请求超时、p2pPush 自动放宽 10 分钟；executePush 失败判定加入 onSent 已写字节与记录已有 transferred，只落 interrupted 保留断点。
+- 顺带加固：DEFAULT_CHUNK_SIZE 64KB→512KB；发送端加背压保护（bufferSize>16MB 等 drain）。
+- typecheck 0 错误、53 项测试全绿；改动未提交 git。遗留：发送方确认框 60s 超时自动取消（「已拒绝或确认超时」）系既有设计，未改。
+
+### 第九轮（同日）
+
+- 传输新增暂停：TransferState 新增 paused；上传挂起分块循环（服务端上传会话保留免重初始化）、p2p-send 挂起推送任务、p2p-recv 经新 WS 命令 p2pPushPause/p2pPushResume 遥控发送端挂起（socket 保留原地继续）；「继续」优先原地唤醒、失败回退完整续传；ws-recv（接收方向）不支持。暂停前持久化断点；cancel 放行 paused；executePush 注册前 abort 同会话旧任务防双 socket。
+- 传输列表行新增「打开目录」：transfer:reveal IPC，文件 showItemInFolder 选中、目录 openPath、未落盘退回父目录；p2p-send 记录从续传上下文还原源路径。
+- UI：进行中行「暂停」/ 已暂停行「继续」/「已暂停」页签 / 每行「打开目录」按钮（操作列宽 150→240）。
+- 新增 S8/S9 暂停回归测试（48MB 大文件）；typecheck 0 错误、55 项测试全绿；改动未提交 git。
+
+### 第九轮（同日）
+
+- 收发叫法统一：传输方向文案统一为「下载（文件进本机）/ 上传（文件出本机）」，经确认范围为 UI 文案 + 注释 + 日志 + 通知/对话框标题 + 用户可见错误文案，协议字段与记录类型标识符（p2pPush、p2p-recv、ws-recv、direction:'send'/'receive'）一律不动，保证已存传输记录与断点续传数据兼容。
+- 覆盖 10 文件约 70 处：TransfersView 类型标签（P2P 发送→P2P 上传、P2P 接收→P2P 下载、接收→下载）、设置页/服务端页「接收策略→下载策略」、下载对话框标题、4 条用户可见报错、protocol/service/fs-ops/transfer-runner/p2p-transfer 注释约 55 处。
+- 有意保留：权限位 DOWNLOAD↔send 语义（仅补注释「对方从本机下载」）、4 个测试文件旧文案、编程语义的「事件推送/socket 分块发送」。
+- typecheck 0 错误、55 项测试全绿；改动未提交 git。
+
+### 第十轮（同日）
+
+- 新增 IP 段检测服务功能（工作区「新建连接」弹窗）：IP 输入框 append 槽「检测」按钮 → 检测弹窗自动识别本机网卡生成网段（多网卡可选）→ 对网段内全部 IP 的默认端口并发探测 → 服务端对探测请求返回确认数据 `{ service:'v-lattice', hostname, protocolVersion }`，收到确认才判「可连接」→ 双击可连接行回填表单并关窗。
+- 新建 `src/main/net-probe.ts`（localNics/expandRange/probeHost/probeRange，宽掩码收敛 /24、每批 32 并发、1.2s 超时、具体失败原因落表）；shared/protocol.ts 增 LocalNic/ProbeResult/ProbeRangeParams；service.ts http server 加确认响应；index.ts 注册 net:localNics/net:probe；preload 暴露 api.net；usePageRegistry 登记 workspace::ip-scan=a001b002。
+- typecheck 0 错误；测试 54/55（S8 暂停用例为 700ms 时序抖动，单独重跑通过，与本功能无关）；改动未提交 git。

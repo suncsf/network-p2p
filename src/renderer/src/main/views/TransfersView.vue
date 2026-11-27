@@ -53,6 +53,12 @@
             <el-badge v-if="countOf('active')" :value="countOf('active')" class="tab-badge" />
           </template>
         </el-tab-pane>
+        <el-tab-pane name="paused">
+          <template #label>
+            已暂停
+            <el-badge v-if="countOf('paused')" :value="countOf('paused')" type="warning" class="tab-badge" />
+          </template>
+        </el-tab-pane>
         <el-tab-pane name="completed">
           <template #label>
             已完成
@@ -90,16 +96,17 @@
         </el-table-column>
         <el-table-column label="进度" min-width="180">
           <template #default="{ row }">
-            <template v-if="row.state === 'active'">
+            <template v-if="row.state === 'active' || row.state === 'paused'">
               <el-progress
                 :percentage="pct(row)"
                 :indeterminate="!row.total"
                 :show-text="!!row.total"
                 :stroke-width="8"
+                :status="row.state === 'paused' ? 'warning' : undefined"
               />
               <div class="speed-line">
                 <span>{{ volumeText(row) }}</span>
-                <template v-if="speeds.get(row.id)">
+                <template v-if="row.state === 'active' && speeds.get(row.id)">
                   <span>· {{ formatSize(speeds.get(row.id)!) }}/s</span>
                   <span v-if="row.total">· 剩余 {{ etaOf(row) }}</span>
                 </template>
@@ -121,10 +128,14 @@
         <el-table-column label="更新时间" width="160">
           <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
+            <el-button v-if="pausable(row)" link type="warning" @click="pause(row)">暂停</el-button>
             <el-button v-if="row.state === 'active'" link type="danger" @click="cancel(row)">取消</el-button>
-            <el-button v-if="resumable(row)" link type="primary" @click="resume(row)">续传</el-button>
+            <el-button v-if="resumable(row)" link type="primary" @click="resume(row)">
+              {{ row.state === 'paused' ? '继续' : '续传' }}
+            </el-button>
+            <el-button link type="primary" plain @click="reveal(row)">打开目录</el-button>
             <el-button v-if="row.state !== 'active'" link type="danger" plain @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -137,7 +148,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { TransferRecord, TransferRequestEvent, TransferState } from '@shared/protocol'
-// 独立于连接的全局页面：待确认请求来自本机服务端（对方可主动推送），传输记录也是全局的
+// 独立于连接的全局页面：待确认请求来自本机服务端（对方可主动发来下载请求），传输记录也是全局的
 // App.vue 全页面 v-show 常驻：重新可见时轻量刷新数据（不重挂载，筛选/滚动等界面状态保留）
 const props = defineProps<{ pageActive?: boolean }>()
 void props
@@ -171,7 +182,7 @@ function pct(r: TransferRecord): number {
   return Math.min(100, Math.round((r.transferred / r.total) * 100))
 }
 
-/** 进行中记录的已传量文案：接收/推送都直观显示当前传了多少 */
+/** 进行中记录的已传量文案：下载/上传都直观显示当前传了多少 */
 function volumeText(r: TransferRecord): string {
   return r.total
     ? `已传 ${formatSize(r.transferred)} / ${formatSize(r.total)}`
@@ -217,9 +228,9 @@ function etaOf(r: TransferRecord): string {
 
 const KIND_META: Record<string, { label: string; type: 'primary' | 'success' | 'warning' }> = {
   upload: { label: '上传', type: 'primary' },
-  'p2p-send': { label: 'P2P 发送', type: 'warning' },
-  'p2p-recv': { label: 'P2P 接收', type: 'success' },
-  'ws-recv': { label: '接收', type: 'success' }
+  'p2p-send': { label: 'P2P 上传', type: 'warning' },
+  'p2p-recv': { label: 'P2P 下载', type: 'success' },
+  'ws-recv': { label: '下载', type: 'success' }
 }
 
 function kindMeta(k: string): { label: string; type: 'primary' | 'success' | 'warning' } {
@@ -228,6 +239,7 @@ function kindMeta(k: string): { label: string; type: 'primary' | 'success' | 'wa
 
 const STATE_META: Record<TransferState, { label: string; type: 'primary' | 'success' | 'info' | 'warning' | 'danger' }> = {
   active: { label: '进行中', type: 'primary' },
+  paused: { label: '已暂停', type: 'warning' },
   completed: { label: '已完成', type: 'success' },
   cancelled: { label: '已取消', type: 'info' },
   interrupted: { label: '已中断', type: 'warning' }
@@ -237,10 +249,17 @@ function stateMeta(s: TransferState): { label: string; type: 'primary' | 'succes
   return STATE_META[s] ?? { label: s, type: 'info' }
 }
 
-/** 已中断可直接续传；P2P 取消的记录保留了部分文件，也允许续传（上传取消已清理半成品，不可续传） */
+/** 可暂停/续传的类型：ws-recv（下载方向）由对端控制传输节奏，本机无法暂停 */
+const PAUSABLE_KINDS = ['upload', 'p2p-send', 'p2p-recv']
+
+function pausable(r: TransferRecord): boolean {
+  return r.state === 'active' && PAUSABLE_KINDS.includes(r.kind)
+}
+
+/** 已暂停/已中断可直接续传；P2P 取消的记录保留了部分文件，也允许续传（上传取消已清理半成品，不可续传） */
 function resumable(r: TransferRecord): boolean {
-  if (!['p2p-send', 'p2p-recv', 'upload'].includes(r.kind)) return false
-  if (r.state === 'interrupted') return true
+  if (!PAUSABLE_KINDS.includes(r.kind)) return false
+  if (r.state === 'paused' || r.state === 'interrupted') return true
   return r.state === 'cancelled' && r.kind !== 'upload'
 }
 
@@ -274,6 +293,23 @@ async function cancel(r: TransferRecord): Promise<void> {
   try {
     await window.api.transfers.cancel(r.id)
     ElMessage.info('已取消')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
+async function pause(r: TransferRecord): Promise<void> {
+  try {
+    await window.api.transfers.pause(r.id)
+    ElMessage.info('已暂停，可稍后继续')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
+async function reveal(r: TransferRecord): Promise<void> {
+  try {
+    await window.api.transfers.reveal(r.id)
   } catch (e) {
     ElMessage.error((e as Error).message)
   }

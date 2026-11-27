@@ -84,10 +84,14 @@ export interface P2PSendOptions {
   files: Array<{ id: number; absPath: string; relPath: string }>
   onProgress?: (sent: number, total: number) => void
   chunkSize?: number
-  /** 断点续传：HELLO 携带 resume，接收端返回已收偏移，从偏移继续 */
+  /** 断点续传：HELLO 携带 resume，下载端返回已收偏移，从偏移继续 */
   resume?: boolean
   /** 每个分块发送前轮询；返回 true 时中止（抛出「传输已取消」） */
   shouldAbort?: () => boolean
+  /** 每个分块发送前轮询；返回 true 期间挂起等待（暂停），恢复后原地继续 */
+  shouldPause?: () => boolean
+  /** 每个分块写入 socket 后回调（未 ACK 也计入）：用于失败时判定「传输确已开始」 */
+  onSent?: (written: number) => void
 }
 
 /** 计算单文件 SHA-256 与大小 */
@@ -104,8 +108,8 @@ export async function hashFile(absPath: string): Promise<{ size: number; sha256:
 }
 
 /**
- * 发送端：连接对端，发送清单与分块，等待完成确认。
- * 断点续传：resume=true 时接收端在 DECISION 里返回各文件已收偏移，从偏移继续发送。
+ * 上传端：连接对端，发送清单与分块，等待完成确认。
+ * 断点续传：resume=true 时下载端在 DECISION 里返回各文件已收偏移，从偏移继续上传。
  */
 export async function sendFiles(opts: P2PSendOptions): Promise<void> {
   const chunkSize = opts.chunkSize ?? DEFAULT_CHUNK_SIZE
@@ -113,17 +117,20 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
   const sizes = new Map<number, number>()
   let total = 0
   for (const f of opts.files) {
-    const h = await hashFile(f.absPath)
-    manifestFiles.push({ id: f.id, path: f.relPath, size: h.size, sha256: h.sha256 })
-    sizes.set(f.id, h.size)
-    total += h.size
+    // 仅 stat 取大小，不做 SHA-256：全量哈希需要把每个文件完整读一遍盘，
+    // 50GB 级传输会在连接前空载数分钟（期间进度 0%、下载授权可能过期），
+    // 且下载端从不校验 sha256，这里不再计算，清单中留空
+    const size = (await stat(f.absPath)).size
+    manifestFiles.push({ id: f.id, path: f.relPath, size, sha256: '' })
+    sizes.set(f.id, size)
+    total += size
   }
 
   const socket = net.connect({ host: opts.host, port: opts.port })
-  // 等待接收方对 MANIFEST 的确认（DECISION），确认后才推流分块
-  let rejectReason = '接收方拒绝或连接已断开'
+  // 等待下载方对 MANIFEST 的确认（DECISION），确认后才推流分块
+  let rejectReason = '对方拒绝或连接已断开'
   let recvOffsets: Record<number, number> = {}
-  /** 对端已确认落盘的字节数（含续传基线）——进度以此为准，与接收端显示一致 */
+  /** 对端已确认落盘的字节数（含续传基线）——进度以此为准，与下载端显示一致 */
   let acked = 0
   let decide!: (ok: boolean) => void
   const decided = new Promise<boolean>((resolve) => (decide = resolve))
@@ -143,7 +150,7 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
     } else if (type === P2PFrameType.ERROR) {
       try {
         const e = JSON.parse(payload.toString('utf8')) as { message?: string }
-        if (e.message) rejectReason = `接收端拒绝：${e.message}`
+        if (e.message) rejectReason = `对方拒绝下载：${e.message}`
       } catch {
         /* ignore */
       }
@@ -183,6 +190,7 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
     acked += Math.max(0, Math.min(recvOffsets[f.id] ?? 0, size))
   }
   opts.onProgress?.(acked, total)
+  let written = 0
   for (const f of opts.files) {
     const size = sizes.get(f.id) ?? 0
     let offset = Math.max(0, Math.min(recvOffsets[f.id] ?? 0, size))
@@ -194,11 +202,30 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
           socket.destroy()
           throw new Error('传输已取消')
         }
+        // 暂停：挂起发送（socket 保留），轮询等恢复；暂停期间取消仍要能退出
+        while (opts.shouldPause?.()) {
+          if (opts.shouldAbort?.()) {
+            socket.destroy()
+            throw new Error('传输已取消')
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 150))
+        }
+        // 背压保护：对端落盘慢时 TCP 缓冲会在内存里无限积压（大文件可达数 GB），
+        // 超过高水位先暂停发送，等 socket 排空再继续
+        if (socket.bufferSize > 16 * 1024 * 1024) {
+          await new Promise<void>((resolve) => socket.once('drain', resolve))
+          if (opts.shouldAbort?.()) {
+            socket.destroy()
+            throw new Error('传输已取消')
+          }
+        }
         const len = Math.min(chunkSize, size - offset)
         const buf = Buffer.alloc(len)
         await fh.read(buf, 0, len, offset)
         await writeFrame(socket, P2PFrameType.CHUNK, encodeChunk(f.id, offset, buf))
         offset += len
+        written += len
+        opts.onSent?.(written)
       }
     } finally {
       await fh.close()
@@ -212,11 +239,11 @@ export async function sendFiles(opts: P2PSendOptions): Promise<void> {
 export interface P2PReceiveOptions {
   /** 固定根目录；若提供 resolveBaseDir 则优先使用动态根 */
   baseDir: string
-  /** 根据会话动态解析接收根目录（例如按 transfer grant 的账户目录） */
+  /** 根据会话动态解析下载根目录（例如按 transfer grant 的账户目录） */
   resolveBaseDir?: (sessionId: string) => string | undefined
   /** 校验 token 是否有效（resume=true 表示这是续传连接，可走兜底重建授权） */
   validateToken: (token: string, resume: boolean) => boolean
-  /** 请求接收确认；返回是否接受（resume=true 表示这是续传连接） */
+  /** 请求下载确认；返回是否接受（resume=true 表示这是续传连接） */
   requestConfirm: (info: {
     fileName: string
     fileCount: number
@@ -224,9 +251,9 @@ export interface P2PReceiveOptions {
     sessionId: string
     resume: boolean
   }) => Promise<boolean>
-  /** HELLO 校验通过后回调（用于注册 socket，支持接收端主动中止） */
+  /** HELLO 校验通过后回调（用于注册 socket，支持下载端主动中止） */
   onSocket?: (sessionId: string, socket: net.Socket) => void
-  /** 接收进度（分块落盘后回调） */
+  /** 下载进度（分块落盘后回调） */
   onProgress?: (received: number, total: number, sessionId: string) => void
   /** 收到 DONE 帧、全部文件落盘完成 */
   onDone?: (sessionId: string) => void
@@ -235,7 +262,7 @@ export interface P2PReceiveOptions {
   chunkSize?: number
 }
 
-/** 接收端：监听端口，处理单个传输连接 */
+/** 下载端：监听端口，处理单个传输连接 */
 export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
   return net.createServer((socket) => {
     const parser = new FrameParser(onFrame)
@@ -274,7 +301,7 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
     function receiveBase(): string {
       if (opts.resolveBaseDir) {
         const b = opts.resolveBaseDir(sessionId)
-        if (!b) throw new Error('无法解析接收目录')
+        if (!b) throw new Error('无法解析下载目录')
         return b
       }
       return opts.baseDir
@@ -312,7 +339,7 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
         case P2PFrameType.MANIFEST: {
           if (!tokenValid) return
           manifest = JSON.parse(payload.toString('utf8')) as P2PManifest
-          // 续传：统计各文件在磁盘上已有的字节数，通过 DECISION 返回给发送端
+          // 续传：统计各文件在磁盘上已有的字节数，通过 DECISION 返回给上传端
           if (resumeMode) {
             const { stat: st } = await import('node:fs/promises')
             for (const f of manifest.files) {
@@ -329,7 +356,7 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
                 offsets.set(f.id, 0)
               }
             }
-            // 已有字节计入进度基线，与发送端显示一致
+            // 已有字节计入进度基线，与上传端显示一致
             let base = 0
             for (const v of offsets.values()) base += v
             received += base
@@ -345,7 +372,7 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
           })
           accepted = acceptedResult
           if (!accepted) {
-            await writeFrame(socket, P2PFrameType.DECISION, encodeDecision(false, '接收方拒绝'))
+            await writeFrame(socket, P2PFrameType.DECISION, encodeDecision(false, '用户拒绝'))
             socket.end()
             return
           }

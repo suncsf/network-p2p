@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, Notification, nativeImage, safeStorage, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, Notification, nativeImage, safeStorage, screen, shell } from 'electron'
 import { join, dirname, basename } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, statSync } from 'fs'
 import { openDatabase, type Db } from './server/db'
 import { LocalStore } from './store'
 import { TransferStore } from './transfers'
@@ -12,6 +12,7 @@ import { generatePassword } from './server/auth'
 import type { ServerEvent, TransferState } from '@shared/protocol'
 import net from 'node:net'
 import { getFreePort } from './util/ports'
+import { localNics, probeRange } from './net-probe'
 import { attachDebug } from './util/debug'
 import { registerPageIdIpc } from './ipc/page-id.handler'
 
@@ -247,6 +248,7 @@ function registerIpc(): void {
     local.setSetting('serverConfig', serverConfig)
     return serverConfig
   })
+  ipcMain.handle('server:listSessions', () => server.listSessions())
 
   // 账户
   ipcMain.handle('accounts:list', () => server.accountRepo.list())
@@ -270,6 +272,10 @@ function registerIpc(): void {
     server.accountRepo.setNode(p.grantId, p.path, p.inherit, p.mask)
   )
   ipcMain.handle('audit:list', (_e, limit?: number) => server.auditRepo.list(limit ?? 200))
+
+  // IP 段检测：本机网卡识别 + 网段并发探测（工作区「检测」弹窗用）
+  ipcMain.handle('net:localNics', () => localNics())
+  ipcMain.handle('net:probe', (_e, p: { cidr: string; port: number }) => probeRange(p.cidr, Number(p.port)))
 
   // 客户端（多连接）
   ipcMain.handle(
@@ -333,24 +339,24 @@ function registerIpc(): void {
   ipcMain.handle('client:decideTransfer', (_e, p: { sessionId: string; accept: boolean }) =>
     server.transferManager.decide(p.sessionId, p.accept)
   )
-  // P2P 接收准备：确保本机服务端在运行（P2P 接收端依赖它），选择保存位置并创建一次性接收授权，
-  // 同时落一条 p2p-recv 传输记录（面板可见，含续传上下文）
+  // P2P 下载准备：确保本机服务端在运行（P2P 下载端依赖它），选择保存位置并创建一次性下载授权，
+  // 同时落一条 p2p-recv（P2P 下载）传输记录（面板可见，含续传上下文）
   ipcMain.handle(
     'p2p:prepareReceive',
     async (
       _e,
-      p: { connId: string; root: string; path: string; name: string; size?: number; isDir: boolean }
+      p: { connId: string; root: string; path: string; paths?: string[]; name: string; size?: number; isDir: boolean }
     ) => {
       if (!server.isRunning()) {
         const ok1 = await LatticeServer.checkPort(serverConfig.wsPort)
         const ok2 = await LatticeServer.checkPort(serverConfig.p2pPort)
-        if (!ok1 || !ok2) throw new Error('本机服务端端口被占用，无法启动 P2P 接收端')
+        if (!ok1 || !ok2) throw new Error('本机服务端端口被占用，无法下载文件')
         await startServer()
       }
       let localDir: string
       let rename: string | undefined
       if (p.isDir) {
-        const r = await dialog.showOpenDialog({ title: '选择接收目录', properties: ['openDirectory', 'createDirectory'] })
+        const r = await dialog.showOpenDialog({ title: '选择下载目录', properties: ['openDirectory', 'createDirectory'] })
         if (r.canceled || r.filePaths.length === 0) throw new Error('CANCELLED')
         localDir = r.filePaths[0]
       } else {
@@ -377,6 +383,8 @@ function registerIpc(): void {
           username: connections.get(p.connId)?.username,
           root: p.root,
           path: p.path,
+          // 批量下载的完整目标列表：续传时按原 paths 重放，只存 path 会丢掉其余项
+          paths: p.paths,
           dir: localDir,
           rename,
           isDir: p.isDir,
@@ -390,7 +398,35 @@ function registerIpc(): void {
   // 统一传输面板
   ipcMain.handle('transfer:list', (_e, state?: TransferState) => transfers.list(state))
   ipcMain.handle('transfer:cancel', (_e, id: number) => runner.cancel(id))
+  ipcMain.handle('transfer:pause', (_e, id: number) => runner.pause(id))
   ipcMain.handle('transfer:resume', (_e, id: number) => runner.resume(id))
+  ipcMain.handle('transfer:reveal', (_e, id: number) => {
+    const rec = transfers.get(id)
+    if (!rec) throw new Error('记录不存在')
+    // p2p-send 记录无本地路径：从续传上下文还原源文件位置（授权根 + 相对路径）
+    let target = rec.localPath
+    if (!target && rec.kind === 'p2p-send') {
+      const rj = transfers.getResume(id)
+      const r = rj ? (JSON.parse(rj) as { root?: string; path?: string; paths?: string[] }) : null
+      const first = r?.paths?.[0] ?? r?.path
+      if (r?.root && first) target = join(r.root, first)
+    }
+    if (!target) throw new Error('该记录没有本地路径信息')
+    if (existsSync(target)) {
+      if (statSync(target).isFile()) {
+        // 文件：打开所在目录并选中
+        shell.showItemInFolder(target)
+        return
+      }
+      // 目录（如批量下载的下载目录）：直接打开
+      void shell.openPath(target)
+      return
+    }
+    // 文件尚未生成（如刚取消/暂停前未落盘）：退回打开所在目录
+    const dir = dirname(target)
+    if (!existsSync(dir)) throw new Error('目录不存在或已被删除')
+    void shell.openPath(dir)
+  })
   ipcMain.handle('transfer:remove', (_e, id: number) => {
     transfers.remove(id)
     return true
@@ -489,7 +525,7 @@ function setupClient(): void {
         n.show()
         safeSend(floaterWindow, 'floater:alert')
       } else if (ev.event === 'transfer:progress') {
-        // 对端发送方取消/失败时，把本机对应的接收记录从「进行中」落到终态，避免永久卡住
+        // 对端上传方取消/失败时，把本机对应的下载记录从「进行中」落到终态，避免永久卡住
         const d = ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string }
         if (d.sessionId && (d.cancelled || d.failed)) {
           for (const r of transfers.getBySession(d.sessionId)) {
@@ -557,6 +593,9 @@ app.whenReady().then(() => {
       n.on('click', () => createMainWindow())
       n.show()
       safeSend(floaterWindow, 'floater:alert')
+    } else if (ev.event === 'client:logout') {
+      // 连接断开：静默转发，服务端页「当前连接」列表据此实时刷新
+      sendToAll('server:event', ev)
     }
   }
 

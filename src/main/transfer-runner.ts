@@ -110,6 +110,8 @@ interface RecvResume {
   username?: string
   root: string
   path: string
+  /** 批量下载的完整远端路径列表（存在时优先于 path 重放） */
+  paths?: string[]
   dir: string
   rename?: string
   isDir: boolean
@@ -126,14 +128,22 @@ function abortedError(): Error {
   return Object.assign(new Error('已取消'), { code: 'ABORTED' })
 }
 
+/** 上传任务控制块：aborted 取消；paused+wake 暂停挂起（resume 唤醒） */
+interface UploadJob {
+  aborted: boolean
+  paused?: boolean
+  /** 暂停挂起的唤醒回调（由 resume 调用） */
+  wake?: () => void
+}
+
 /**
  * 传输任务执行器：
  * - 上传：主进程分块循环（4MB/块），支持取消与断点续传
- * - 取消/续传：按记录类型分发到本地任务或服务端推送任务
+ * - 取消/续传：按记录类型分发到本地任务或服务端上传任务
  */
 export class TransferRunner {
   /** 进行中的上传任务（记录 id → 任务） */
-  private jobs = new Map<number, { aborted: boolean }>()
+  private jobs = new Map<number, UploadJob>()
 
   /** 批量上传队列：按顺序执行，避免同时发起大量传输 */
   private queue: number[] = []
@@ -279,7 +289,7 @@ export class TransferRunner {
     const resumeJson = this.store.getResume(recId)
     if (!rec || !resumeJson) return
     const r = JSON.parse(resumeJson) as UploadResume
-    const job = { aborted: false }
+    const job: UploadJob = { aborted: false }
     this.jobs.set(recId, job)
     try {
       // 原连接可能已失效（重启后 id 变化）：按端点信息匹配现存连接
@@ -306,7 +316,12 @@ export class TransferRunner {
     }
   }
 
-  private async uploadLoop(recId: number, r: UploadResume, job: { aborted: boolean }, connId: string): Promise<void> {
+  private async uploadLoop(
+    recId: number,
+    r: UploadResume,
+    job: UploadJob,
+    connId: string
+  ): Promise<void> {
     // 源文件仍需存在且足够大
     let localSize = r.size
     try {
@@ -333,6 +348,13 @@ export class TransferRunner {
       let lastNotify = 0
       while (offset < r.size) {
         if (job.aborted) throw abortedError()
+        // 暂停：持久化断点后挂起，等 resume 唤醒（上传会话在服务端保留，原地继续）
+        if (job.paused) {
+          this.store.update(recId, { resume: JSON.stringify(r) })
+          await new Promise<void>((resolve) => (job.wake = resolve))
+          job.wake = undefined
+          if (job.aborted) throw abortedError()
+        }
         const len = Math.min(UPLOAD_CHUNK, r.size - offset)
         const buf = Buffer.alloc(len)
         await fh.read(buf, 0, len, offset)
@@ -373,16 +395,50 @@ export class TransferRunner {
     }
   }
 
-  /* ------------------------------ 取消 / 续传 ------------------------------ */
+  /* ------------------------------ 暂停 / 取消 / 续传 ------------------------------ */
 
-  /** 取消一条传输记录（仅进行中的可取消） */
-  async cancel(id: number): Promise<void> {
+  /** 暂停一条进行中的传输（保留断点，可「继续」原地恢复） */
+  async pause(id: number): Promise<void> {
     const rec = this.store.get(id)
     if (!rec) throw new Error('记录不存在')
     if (rec.state !== 'active') throw new Error('该传输已结束')
     if (rec.kind === 'upload') {
+      // 有任务：挂起分块循环（上传会话服务端保留，恢复免重初始化）；
+      // 无任务（批量排队中）：直接标记，pump 会跳过非 active 记录
       const job = this.jobs.get(id)
-      if (job) job.aborted = true
+      if (job) job.paused = true
+      this.store.update(id, { state: 'paused', error: '已暂停' })
+      return
+    }
+    if (rec.kind === 'p2p-send') {
+      this.server.pausePush(rec.sessionId)
+      this.store.update(id, { state: 'paused', error: '已暂停' })
+      return
+    }
+    if (rec.kind === 'p2p-recv') {
+      // 下载是被动方：通知上传端挂起上传（原 socket 保留）
+      const rj = this.store.getResume(id)
+      const r = rj ? (JSON.parse(rj) as RecvResume) : null
+      const connId = r ? this.resolveConn(r, rec.peer) : null
+      if (!connId) throw new Error('没有可用的连接，无法暂停')
+      await this.conns.request(connId, 'p2pPushPause', { sessionId: rec.sessionId })
+      this.store.update(id, { state: 'paused', error: '已暂停' })
+      return
+    }
+    throw new Error('下载方向的传输由对端控制，暂不支持暂停')
+  }
+
+  /** 取消一条传输记录（进行中 / 已暂停的可取消） */
+  async cancel(id: number): Promise<void> {
+    const rec = this.store.get(id)
+    if (!rec) throw new Error('记录不存在')
+    if (rec.state !== 'active' && rec.state !== 'paused') throw new Error('该传输已结束')
+    if (rec.kind === 'upload') {
+      const job = this.jobs.get(id)
+      if (job) {
+        job.aborted = true
+        job.wake?.() // 已暂停挂起中：唤醒让循环退出
+      }
       const rj = this.store.getResume(id)
       const r = rj ? (JSON.parse(rj) as UploadResume) : null
       if (r?.uploadId && this.connected(r.connId)) {
@@ -396,7 +452,7 @@ export class TransferRunner {
       return
     }
     if (rec.kind === 'p2p-recv') {
-      // 1) 断开本机接收 socket；2) 通知发送端停止推送；3) 标记已取消
+      // 1) 断开本机下载 socket；2) 通知对端停止上传；3) 标记已取消
       this.server.abortReceive(rec.sessionId)
       const rj = this.store.getResume(id)
       const r = rj ? (JSON.parse(rj) as RecvResume) : null
@@ -409,17 +465,29 @@ export class TransferRunner {
     }
   }
 
-  /** 断点续传（已中断；P2P 取消的记录保留部分文件，也允许续传） */
+  /** 断点续传（已中断 / 已暂停；P2P 取消的记录保留部分文件，也允许续传） */
   async resume(id: number): Promise<void> {
     const rec = this.store.get(id)
     if (!rec) throw new Error('记录不存在')
     if (rec.state === 'active') throw new Error('传输正在进行中')
     const resumeJson = this.store.getResume(id)
     if (!resumeJson) throw new Error('该记录没有续传信息')
-    const canResume = rec.state === 'interrupted' || (rec.state === 'cancelled' && rec.kind !== 'upload')
+    const canResume =
+      rec.state === 'interrupted' ||
+      rec.state === 'paused' ||
+      (rec.state === 'cancelled' && rec.kind !== 'upload')
     if (!canResume) throw new Error('该记录不支持续传')
 
     if (rec.kind === 'upload') {
+      // 已暂停且任务仍在：直接唤醒挂起的分块循环，原地继续（免重连/重初始化）
+      const job = this.jobs.get(id)
+      if (rec.state === 'paused' && job) {
+        job.paused = false
+        job.wake?.()
+        job.wake = undefined
+        this.store.update(id, { state: 'active', error: null })
+        return
+      }
       const r = JSON.parse(resumeJson) as UploadResume
       const connId = this.resolveConn(r, rec.peer)
       if (!connId) {
@@ -432,18 +500,38 @@ export class TransferRunner {
     }
 
     if (rec.kind === 'p2p-recv') {
+      // 已暂停：优先唤醒对端挂起的上传（原会话原地继续），失败再走完整续传
+      if (rec.state === 'paused') {
+        const pr = JSON.parse(resumeJson) as RecvResume
+        const liveConn = pr.connId && this.connected(pr.connId) ? pr.connId : this.resolveConn(pr, rec.peer)
+        if (liveConn) {
+          try {
+            await this.conns.request(liveConn, 'p2pPushResume', { sessionId: rec.sessionId })
+            this.store.update(id, { state: 'active', error: null })
+            return
+          } catch {
+            /* 对端任务已不在（如对端重启）：走完整续传流程 */
+          }
+        }
+      }
       const r = JSON.parse(resumeJson) as RecvResume
+      // 对端主动上传的下载记录只有本机目录、没有对端 root/paths，本机无法重放上传，
+      // 必须由上传方在其面板续传；不校验会以 undefined 调 p2pPush 报「权限不足」等误导性错误
+      if (!r.root || (typeof r.path !== 'string' && !(r.paths && r.paths.length > 0))) {
+        throw new Error('该记录缺少对端路径信息，无法在本机续传，请在对端（上传方）续传')
+      }
       const connId = this.resolveConn(r, rec.peer)
       if (!connId) {
         throw new Error('没有可用的连接，无法续传，请重新连接后重试')
       }
-      // 用原 sessionId 重建接收授权（免对话框），对端可按原会话续传
+      // 用原 sessionId 重建下载授权（免对话框），对端可按原会话续传
       const grant = this.server.createLocalTransferGrant(r.dir, { token: rec.sessionId })
       this.store.update(id, { state: 'active', error: null })
       try {
         await this.conns.request(connId, 'p2pPush', {
           root: r.root,
-          path: r.path,
+          // 批量下载按原 paths 重放（单选/多选都完整续传），旧记录回退为单 path
+          ...(r.paths && r.paths.length > 0 ? { paths: r.paths } : { path: r.path }),
           host: grant.host,
           port: grant.port,
           p2pToken: grant.p2pToken,
@@ -458,7 +546,12 @@ export class TransferRunner {
       return
     }
 
-    // p2p-send：重放推送（接收端校验 token，仍有效则从断点继续）
+    // p2p-send：重放上传（对端校验 token，仍有效则从断点继续）
+    // 已暂停：优先唤醒本机挂起的上传任务（原 socket 原地继续），失败再走完整重放
+    if (rec.state === 'paused' && this.server.resumePausedPush(rec.sessionId)) {
+      this.store.update(id, { state: 'active', error: null })
+      return
+    }
     const r = JSON.parse(resumeJson) as {
       root: string
       path: string

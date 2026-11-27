@@ -11,10 +11,10 @@
         <el-form-item label="传输确认超时(ms)">
           <el-input-number v-model="config.confirmTimeoutMs" :min="5000" :step="5000" />
         </el-form-item>
-        <el-form-item label="接收策略">
+        <el-form-item label="下载策略">
           <el-radio-group v-model="receiveMode">
             <el-radio value="confirm">需要确认（默认）</el-radio>
-            <el-radio value="auto">自动接收</el-radio>
+            <el-radio value="auto">自动下载</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="失败锁定次数">
@@ -33,7 +33,7 @@
     <el-card shadow="never" header="说明" class="note">
       <ul>
         <li>端口修改后需重启服务端生效；端口被占用时可一键自动选择空闲端口。</li>
-        <li>接收策略保存后立即对运行中的服务端生效（端口除外）。</li>
+        <li>下载策略保存后立即对运行中的服务端生效（端口除外）。</li>
         <li>服务端的启动/停止请在「服务端」页操作。</li>
         <li>关闭窗口不会退出程序，程序会隐藏在右下角托盘图标中。</li>
         <li>悬浮球可拖动到任意位置，点击展开主界面。</li>

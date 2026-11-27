@@ -7,7 +7,9 @@ const api = {
     getStatus: () => ipcRenderer.invoke('server:getStatus'),
     start: () => ipcRenderer.invoke('server:start'),
     stop: () => ipcRenderer.invoke('server:stop'),
-    freePort: () => ipcRenderer.invoke('server:freePort')
+    freePort: () => ipcRenderer.invoke('server:freePort'),
+    /** 服务端当前登录的连接列表 */
+    listSessions: () => ipcRenderer.invoke('server:listSessions')
   },
   accounts: {
     list: () => ipcRenderer.invoke('accounts:list'),
@@ -25,6 +27,12 @@ const api = {
   },
   audit: {
     list: (limit?: number) => ipcRenderer.invoke('audit:list', limit)
+  },
+  net: {
+    /** 本机 IPv4 网卡列表（含推导的网段 CIDR） */
+    localNics: () => ipcRenderer.invoke('net:localNics'),
+    /** 探测网段内所有 IP 的默认端口，返回每个 IP 的可连接状态 */
+    probe: (p: { cidr: string; port: number }) => ipcRenderer.invoke('net:probe', p)
   },
   client: {
     connect: (opts: unknown) => ipcRenderer.invoke('client:connect', opts),
@@ -45,7 +53,9 @@ const api = {
   transfers: {
     list: (state?: string) => ipcRenderer.invoke('transfer:list', state),
     cancel: (id: number) => ipcRenderer.invoke('transfer:cancel', id),
+    pause: (id: number) => ipcRenderer.invoke('transfer:pause', id),
     resume: (id: number) => ipcRenderer.invoke('transfer:resume', id),
+    reveal: (id: number) => ipcRenderer.invoke('transfer:reveal', id),
     remove: (id: number) => ipcRenderer.invoke('transfer:remove', id),
     clearFinished: () => ipcRenderer.invoke('transfer:clearFinished'),
     fail: (sessionId: string, message: string) => ipcRenderer.invoke('transfer:fail', { sessionId, message }),

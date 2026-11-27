@@ -148,7 +148,11 @@ export class LatticeClient {
     }
   }
 
-  request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  request<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 30000
+  ): Promise<T> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('未连接'))
     }
@@ -162,7 +166,7 @@ export class LatticeClient {
           this.pending.delete(id)
           reject(new Error('请求超时'))
         }
-      }, 30000)
+      }, timeoutMs)
     })
   }
 

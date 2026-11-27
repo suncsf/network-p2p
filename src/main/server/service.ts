@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer, type Server } from 'node:http'
-import { networkInterfaces } from 'node:os'
+import { hostname, networkInterfaces } from 'node:os'
 import { basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
@@ -23,6 +23,7 @@ import type {
   FileRootGrant,
   TransferGrantParams
 } from '@shared/protocol'
+import { PROTOCOL_VERSION } from '@shared/protocol'
 import { createReceiveServer, sendFiles } from '@main/p2p/transfer'
 import net from 'node:net'
 
@@ -41,6 +42,8 @@ export interface AuthSession {
   token: string
   grants: Map<string, { root: string; nodes: PermissionNode[] }>
   socket: WebSocket
+  /** 登录时间（epoch ms） */
+  loginAt: number
   lastSeen: number
 }
 
@@ -51,9 +54,12 @@ interface TransferGrantRecord {
   relPath: string
   direction: 'send' | 'receive'
   expiresAt: number
-  /** 本机用户主动发起的下载：发起时已选好保存位置，接收端免二次确认 */
+  /** 本机用户主动发起的下载：发起时已选好保存位置，下载端免二次确认 */
   preAuthorized?: boolean
 }
+
+/** P2P 传输授权有效期：需覆盖「对端枚举大文件夹 + 人工确认 + 连接建立」等握手前耗时，握手成功后滑动续期 */
+const GRANT_TTL_MS = 30 * 60 * 1000
 
 export class LatticeServer {
   private wss?: WebSocketServer
@@ -61,15 +67,15 @@ export class LatticeServer {
   private p2pServer?: net.Server
   private sessions = new Map<string, AuthSession>()
   private transferGrants = new Map<string, TransferGrantRecord>()
-  /** WS 上传已确认缓存：key 为 accountId:root:path，值为止步时间；5 分钟内重试/重初始化免二次确认 */
+  /** WS 下载（对方发起）已确认缓存：key 为 accountId:root:path，值为止步时间；5 分钟内重试/重初始化免二次确认 */
   private wsUploadApproved = new Map<string, number>()
-  /** 进行中的 P2P 推送任务（sessionId → 任务），支持取消 */
-  private pushJobs = new Map<string, { aborted: boolean }>()
-  /** 发送端进度节流（sessionId → 上次百分比） */
+  /** 进行中的 P2P 上传任务（sessionId → 任务），支持取消 */
+  private pushJobs = new Map<string, { aborted: boolean; paused?: boolean }>()
+  /** 上传端进度节流（sessionId → 上次百分比） */
   private pushPct = new Map<string, number>()
-  /** 接收中的 socket（sessionId → socket），支持接收端主动中止 */
+  /** 下载中的 socket（sessionId → socket），支持下载端主动中止 */
   private recvSockets = new Map<string, net.Socket>()
-  /** WS 上传（对方推送）进度回写映射：uploadId → 传输记录 id */
+  /** WS 下载（对方发起）进度回写映射：uploadId → 传输记录 id */
   private uploadRecs = new Map<string, number>()
   private accounts: AccountRepo
   private audit: AuditRepo
@@ -113,7 +119,7 @@ export class LatticeServer {
 
   updateConfig(patch: Partial<ServerConfig>): void {
     this.config = { ...this.config, ...patch }
-    // 热更新运行中的接收端配置：自动接收/确认超时立即生效；端口需重启服务端重新绑定
+    // 热更新运行中的下载端配置：自动下载/确认超时立即生效；端口需重启服务端重新绑定
     this.transfers.update({
       p2pPort: this.config.p2pPort,
       confirmTimeoutMs: this.config.confirmTimeoutMs,
@@ -133,14 +139,25 @@ export class LatticeServer {
 
   async start(): Promise<void> {
     if (this.running) return
-    this.http = createServer()
+    this.http = createServer((_req, res) => {
+      // IP 段检测：探测端发来的 HTTP 请求（非 WS 升级）返回确认数据，
+      // 探测端据此判定「该 IP + 默认端口可连接」（见 src/main/net-probe.ts）
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(
+        JSON.stringify({
+          service: 'v-lattice',
+          hostname: hostname(),
+          protocolVersion: PROTOCOL_VERSION
+        })
+      )
+    })
     this.wss = new WebSocketServer({ server: this.http })
     this.wss.on('connection', (socket) => this.onConnection(socket))
 
     const recvPct = new Map<string, number>()
     const p2p = createReceiveServer({
       baseDir: '',
-      // 根据 transfer grant 动态解析接收根目录，确保写入限制在授权目录内
+      // 根据 transfer grant 动态解析下载根目录，确保写入限制在授权目录内
       resolveBaseDir: (sessionId) => {
         const g = this.transferGrants.get(sessionId)
         return g?.root
@@ -148,12 +165,12 @@ export class LatticeServer {
       validateToken: (token, resume) => {
         const g = this.transferGrants.get(token)
         if (g && g.expiresAt > Date.now()) {
-          // 滑动续期：每次成功握手延长授权，长传输/续传不受初始 5 分钟限制
-          g.expiresAt = Date.now() + 5 * 60 * 1000
+          // 滑动续期：每次成功握手延长授权，长传输/续传不受初始限制
+          g.expiresAt = Date.now() + GRANT_TTL_MS
           return true
         }
-        // 续传兜底：发送端单方面点续传时，接收端授权可能已过期。
-        // 同会话接收记录存在且未完成 → 从记录上下文自动重建授权（一次性 token 本身即凭证）
+        // 续传兜底：上传端单方面点续传时，下载端授权可能已过期。
+        // 同会话下载记录存在且未完成 → 从记录上下文自动重建授权（一次性 token 本身即凭证）
         if (resume) {
           const rec = this.store?.getBySession(token).find((r) => r.kind === 'p2p-recv')
           if (rec && rec.state !== 'completed') {
@@ -177,14 +194,18 @@ export class LatticeServer {
         if (!g) return false
         const rec = this.store?.getBySession(info.sessionId).find((r) => r.kind === 'p2p-recv')
         const from = g.accountId > 0 ? this.sessionUsername(g.accountId) : 'P2P 对端'
-        // 授权时已确认过（本机发起的下载 / transferGrant 接收方向）：直接放行
+        // 授权时已确认过（本机发起的下载 / transferGrant 下载方向）：直接放行
         if (g.preAuthorized) {
           if (rec) this.store?.update(rec.id, { total: info.totalSize })
           else this.createRecvRecord(g, from, info)
           return true
         }
-        // 断点续传：同会话记录存在且非进行中 → 沿用既有授权，免二次确认
-        if (info.resume && rec && (rec.state === 'interrupted' || rec.state === 'cancelled')) {
+        // 断点续传：同会话记录存在且非进行中 → 沿用既有授权，免二次确认（含已暂停）
+        if (
+          info.resume &&
+          rec &&
+          (rec.state === 'interrupted' || rec.state === 'cancelled' || rec.state === 'paused')
+        ) {
           this.store?.update(rec.id, { state: 'active', error: null, total: info.totalSize })
           return true
         }
@@ -205,14 +226,14 @@ export class LatticeServer {
         }
         return ok
       },
-      // 注册接收 socket，支持「接收端取消」
+      // 注册下载 socket，支持「下载端取消」
       onSocket: (sessionId, socket) => {
         this.recvSockets.set(sessionId, socket)
         socket.on('close', () => {
           if (this.recvSockets.get(sessionId) === socket) this.recvSockets.delete(sessionId)
         })
       },
-      // 接收端视角的进度广播 + 记录更新
+      // 下载端视角的进度广播 + 记录更新
       onProgress: (received, total, sessionId) => {
         const rec = this.store?.getBySession(sessionId).find((r) => r.kind === 'p2p-recv')
         if (rec && rec.state === 'active') this.store?.updateProgress(rec.id, received, total)
@@ -280,6 +301,16 @@ export class LatticeServer {
     return out
   }
 
+  /** 当前登录的连接列表（服务端「当前连接」页签展示用） */
+  listSessions(): Array<{ username: string; address: string; loginAt: number; lastSeen: number }> {
+    return Array.from(this.sessions.values()).map((s) => ({
+      username: s.username,
+      address: this.remoteAddress(s.socket),
+      loginAt: s.loginAt,
+      lastSeen: s.lastSeen
+    }))
+  }
+
   private onConnection(socket: WebSocket): void {
     let session: AuthSession | null = null
 
@@ -308,9 +339,14 @@ export class LatticeServer {
     })
 
     socket.on('close', () => {
-      if (session) {
-        this.sessions.delete(session.token)
+      // delete 返回 false 说明会话已被移除（server.stop 清空 / disconnect RPC 主动断开），不重复通知
+      if (session && this.sessions.delete(session.token)) {
         this.audit.log(session.username, 'disconnect', {})
+        // 通知本机 UI：连接已断开（当前连接列表实时刷新）
+        this.onLocalEvent?.({
+          event: 'client:logout',
+          data: { username: session.username, address: this.remoteAddress(socket) }
+        })
       }
     })
   }
@@ -349,6 +385,7 @@ export class LatticeServer {
       token,
       grants,
       socket,
+      loginAt: Date.now(),
       lastSeen: Date.now()
     }
     this.sessions.set(token, session)
@@ -424,14 +461,14 @@ export class LatticeServer {
           this.reply(socket, req.id, true, {})
           break
         case 'uploadInit': {
-          // 接收策略：落盘前先征求本机用户同意（拒绝/超时则整个上传被拒）。
+          // 下载策略：落盘前先征求本机用户同意（拒绝/超时则整个传输被拒）。
           // 同一账户对同一路径 5 分钟内已确认过则免重复确认（中断重初始化不二次弹窗）
           const ok = await this.ensureUploadAccepted(s, p.root, p.path, p.size)
           if (!ok) {
             throw Object.assign(new Error('对方拒绝或确认超时'), { code: 'FORBIDDEN' })
           }
           const r = await ops.createUpload(p.root, p.path)
-          // 对方推送落接收记录：传输面板可见、有进度；对端取消/断连会同步状态
+          // 对方发来文件落下载记录：传输面板可见、有进度；对端取消/断连会同步状态
           const rec = this.store?.create({
             kind: 'ws-recv',
             peer: s.username,
@@ -461,7 +498,7 @@ export class LatticeServer {
           await ops.appendUpload(p.uploadId, p.offset, p.data)
           const recId = this.uploadRecs.get(p.uploadId)
           if (recId !== undefined) {
-            // base64 长度换算落盘字节数（含 padding 修正），回写接收进度
+            // base64 长度换算落盘字节数（含 padding 修正），回写下载进度
             const decoded =
               Math.floor((p.data.length * 3) / 4) - (p.data.endsWith('==') ? 2 : p.data.endsWith('=') ? 1 : 0)
             const cur = this.store?.get(recId)
@@ -491,15 +528,30 @@ export class LatticeServer {
           await this.handleP2pPush(s, socket, req, ops)
           break
         case 'p2pPushStop': {
-          // 接收方取消：中止本机推送任务并把发送记录标记为已取消
+          // 下载方取消：中止本机上传任务并把上传记录标记为已取消
           const sid = (req.params as { sessionId: string }).sessionId
           const job = this.pushJobs.get(sid)
           if (job) job.aborted = true
           for (const r of this.store?.getBySession(sid) ?? []) {
-            if (r.kind === 'p2p-send' && (r.state === 'active' || r.state === 'interrupted')) {
-              this.store?.update(r.id, { state: 'cancelled', error: '接收方取消了传输' })
+            if (
+              r.kind === 'p2p-send' &&
+              (r.state === 'active' || r.state === 'interrupted' || r.state === 'paused')
+            ) {
+              this.store?.update(r.id, { state: 'cancelled', error: '对方取消了下载' })
             }
           }
+          this.reply(socket, req.id, true, {})
+          break
+        }
+        case 'p2pPushPause': {
+          // 下载方暂停：挂起本机上传（socket 保留，恢复后原地继续）
+          this.pausePush((req.params as { sessionId: string }).sessionId)
+          this.reply(socket, req.id, true, {})
+          break
+        }
+        case 'p2pPushResume': {
+          // 下载方继续：唤醒已暂停的上传任务
+          this.resumePausedPush((req.params as { sessionId: string }).sessionId)
           this.reply(socket, req.id, true, {})
           break
         }
@@ -510,7 +562,7 @@ export class LatticeServer {
             this.uploadRecs.delete(p.uploadId)
             const cur = this.store?.get(recId)
             if (cur && cur.state === 'active') {
-              this.store?.update(recId, { state: 'cancelled', error: '对方取消了传输' })
+              this.store?.update(recId, { state: 'cancelled', error: '对方取消了上传' })
             }
           }
           this.reply(socket, req.id, true, {})
@@ -523,7 +575,7 @@ export class LatticeServer {
           this.reply(socket, req.id, true, { items: this.transfers.listPending() })
           break
         case 'disconnect':
-          this.sessions.delete(s.token)
+          // 交给 socket close 事件统一清理会话并发 logout 通知
           socket.close()
           break
         default:
@@ -545,7 +597,7 @@ export class LatticeServer {
     }
   }
 
-  /** WS 上传确认：接收策略为「需要确认」时征求本机用户同意；已确认过且未过期则直接放行 */
+  /** WS 下载确认（对方发起）：下载策略为「需要确认」时征求本机用户同意；已确认过且未过期则直接放行 */
   private async ensureUploadAccepted(
     s: AuthSession,
     root: string,
@@ -580,8 +632,8 @@ export class LatticeServer {
     }
     const token = generateToken()
     let preAuthorized = false
-    // 接收方向（对方要往本机推文件）：授权时先确认，接受后才发 token，
-    // 并标记预授权——发送方连接进来不再二次确认，无需挂连接等待
+    // 下载方向（对方要把文件传到本机）：授权时先确认，接受后才发 token，
+    // 并标记预授权——上传方连接进来不再二次确认，无需挂连接等待
     if (p.direction === 'receive') {
       const ok = await this.transfers.request({
         sessionId: token,
@@ -601,7 +653,7 @@ export class LatticeServer {
       root: p.root,
       relPath: p.path,
       direction: p.direction,
-      expiresAt: Date.now() + 5 * 60 * 1000,
+      expiresAt: Date.now() + GRANT_TTL_MS,
       preAuthorized
     })
     const host = this.listInterfaces()[0] ?? '127.0.0.1'
@@ -620,7 +672,7 @@ export class LatticeServer {
     this.reply(socket, req.id, true, { decided: ok })
   }
 
-  /** 本机接收授权：为 P2P 拉取创建一次性 token（接收端为本机服务端，写入目录由调用方指定） */
+  /** 本机下载授权：为 P2P 下载创建一次性 token（下载端为本机服务端，写入目录由调用方指定） */
   createLocalTransferGrant(
     root: string,
     opts?: { token?: string }
@@ -632,7 +684,7 @@ export class LatticeServer {
       root,
       relPath: '',
       direction: 'receive',
-      expiresAt: Date.now() + 5 * 60 * 1000,
+      expiresAt: Date.now() + GRANT_TTL_MS,
       preAuthorized: true
     })
     const host = this.listInterfaces()[0] ?? '127.0.0.1'
@@ -660,7 +712,7 @@ export class LatticeServer {
     )
   }
 
-  /** P2P 推送（或续传）准备阶段：校验权限、收集文件、建立/复用记录 */
+  /** P2P 上传（或续传）准备阶段：校验权限、收集文件、建立/复用记录 */
   private async preparePush(
     p: {
       root: string
@@ -682,7 +734,12 @@ export class LatticeServer {
     relPaths: string[]
   }> {
     const fileOps = ops ?? new FileOps(this.systemChecker(p.root))
-    const targets = p.paths?.length ? p.paths : [p.path!]
+    // 批量(paths)与单路径(path)统一成 targets；都不存在时（如旧版记录的续传上下文缺失）明确报错，
+    // 而不是把 undefined 传进 resolveSafePath 抛出难以理解的「非法路径」
+    const targets = p.paths?.length ? p.paths : typeof p.path === 'string' ? [p.path] : []
+    if (targets.length === 0) {
+      throw Object.assign(new Error('缺少传输路径，无法续传，请重新发起传输'), { code: 'BAD_REQUEST' as const })
+    }
     const items = await this.collectTargets(fileOps, p.root, targets)
     let relPaths: string[] = items.map((f) => f.relPath)
     if (p.rename) {
@@ -700,11 +757,11 @@ export class LatticeServer {
         /* 忽略瞬时不可统计的文件 */
       }
     }
-    // 同会话已有发送记录则复用（续传），否则新建
+    // 同会话已有上传记录则复用（续传），否则新建
     const existing = this.store?.getBySession(p.sessionId).find((r) => r.kind === 'p2p-send')
     let recId: number | undefined
     if (existing && existing.state !== 'completed') {
-      // 仅当确有活跃推送任务时才算冲突；「已标记 active 但任务不在」是续传流程预置的状态，放行
+      // 仅当确有活跃上传任务时才算冲突；「已标记 active 但任务不在」是续传流程预置的状态，放行
       if (existing.state === 'active' && this.pushJobs.has(p.sessionId)) {
         throw Object.assign(new Error('该传输正在进行中'), { code: 'CONFLICT' as const })
       }
@@ -723,7 +780,9 @@ export class LatticeServer {
         resume: JSON.stringify({
           root: p.root,
           path: p.path,
-          paths: targets.length > 1 ? targets : undefined,
+          // 始终保留完整目标列表：单选批量下载（paths 只有一项）此前 paths 不落盘、
+          // path 又不存在，续传时 collectTargets 收到 [undefined] 抛「非法路径」
+          paths: targets,
           host: p.host,
           port: p.port,
           sessionId: p.sessionId,
@@ -736,7 +795,7 @@ export class LatticeServer {
     return { recId, fileCount: items.length, total, items, relPaths }
   }
 
-  /** 收集多个远端路径的待发送文件（目录递归展开），按 relPath 去重并要求非空 */
+  /** 收集多个远端路径的待上传文件（目录递归展开），按 relPath 去重并要求非空 */
   private async collectTargets(
     fileOps: FileOps,
     root: string,
@@ -752,12 +811,12 @@ export class LatticeServer {
       }
     }
     if (out.length === 0) {
-      throw Object.assign(new Error('没有可发送的文件'), { code: 'BAD_REQUEST' as const })
+      throw Object.assign(new Error('没有可下载的文件'), { code: 'BAD_REQUEST' as const })
     }
     return out
   }
 
-  /** P2P 推送执行阶段：建立任务注册表并发送（数据不经 WS 命令通道） */
+  /** P2P 上传执行阶段：建立任务注册表并发送（数据不经 WS 命令通道） */
   private async executePush(
     p: {
       root: string
@@ -772,9 +831,14 @@ export class LatticeServer {
     },
     ctx: { recId?: number; items: Array<{ absPath: string; relPath: string }>; total: number }
   ): Promise<void> {
-    const job = { aborted: false }
+    const job = { aborted: false, paused: false }
+    // 同会话旧任务仍在（如暂停后走了完整续传）：置 abort 让其退出，避免双任务双 socket
+    const prev = this.pushJobs.get(p.sessionId)
+    if (prev) prev.aborted = true
     this.pushJobs.set(p.sessionId, job)
     let sentBytes = 0
+    /** 本次会话已写入 socket 的字节数（未 ACK 也计入） */
+    let writtenBytes = 0
     let lastStore = 0
     try {
       await sendFiles({
@@ -784,6 +848,10 @@ export class LatticeServer {
         sessionId: p.sessionId,
         resume: p.resume === true,
         shouldAbort: () => job.aborted,
+        shouldPause: () => job.paused === true,
+        onSent: (n) => {
+          writtenBytes = n
+        },
         files: ctx.items.map((f, i) => ({ id: i + 1, absPath: f.absPath, relPath: f.relPath })),
         onProgress: (sent, total) => {
           sentBytes = sent
@@ -809,8 +877,10 @@ export class LatticeServer {
       this.pushPct.delete(p.sessionId)
       const msg = (e as Error).message
       if (!job.aborted) {
-        // 未发出任何字节（拒绝/超时/连不上）→ 已取消；中途失败 → 已中断（可续传）
-        const state = sentBytes > 0 ? 'interrupted' : 'cancelled'
+        // 未发出任何字节且磁盘上没有历史数据（拒绝/超时/连不上）→ 已取消；
+        // 已发出过字节（ACK 或已写入 socket）、或续传基线前失败但磁盘已有部分文件 → 已中断（可续传）
+        const prevBytes = ctx.recId !== undefined ? (this.store?.get(ctx.recId)?.transferred ?? 0) : 0
+        const state = sentBytes > 0 || writtenBytes > 0 || prevBytes > 0 ? 'interrupted' : 'cancelled'
         if (ctx.recId !== undefined) {
           this.store?.update(ctx.recId, { state, error: msg })
         }
@@ -826,24 +896,43 @@ export class LatticeServer {
     }
   }
 
-  /** 取消发送端推送任务（发送面板「取消」） */
+  /** 取消上传任务（传输面板「取消」） */
   cancelPush(sessionId: string, reason: string): void {
     const job = this.pushJobs.get(sessionId)
     if (job) job.aborted = true
     for (const r of this.store?.getBySession(sessionId) ?? []) {
-      if (r.kind === 'p2p-send' && (r.state === 'active' || r.state === 'interrupted')) {
+      if (
+        r.kind === 'p2p-send' &&
+        (r.state === 'active' || r.state === 'interrupted' || r.state === 'paused')
+      ) {
         this.store?.update(r.id, { state: 'cancelled', error: reason })
       }
     }
   }
 
-  /** 接收端主动中止：断开该会话的接收 socket（发送端会感知失败） */
+  /** 暂停上传任务（挂起上传，socket 保留）；返回是否存在活跃任务 */
+  pausePush(sessionId: string): boolean {
+    const job = this.pushJobs.get(sessionId)
+    if (!job) return false
+    job.paused = true
+    return true
+  }
+
+  /** 恢复已暂停的上传任务（原地继续）；返回是否存在已暂停任务 */
+  resumePausedPush(sessionId: string): boolean {
+    const job = this.pushJobs.get(sessionId)
+    if (!job || !job.paused) return false
+    job.paused = false
+    return true
+  }
+
+  /** 下载端主动中止：断开该会话的下载 socket（上传端会感知失败） */
   abortReceive(sessionId: string): void {
     const s = this.recvSockets.get(sessionId)
     if (s) s.destroy()
   }
 
-  /** 续传发送端推送（记录里的 resume 上下文） */
+  /** 续传上传（记录里的 resume 上下文） */
   async resumePush(r: {
     root: string
     path?: string
@@ -876,7 +965,7 @@ export class LatticeServer {
     )
   }
 
-  /** P2P 推送：服务端直接从磁盘分块推流给对端接收端口，不经 WS 命令通道，无大小限制 */
+  /** P2P 上传：服务端直接从磁盘分块推流给对端下载端口，不经 WS 命令通道，无大小限制 */
   private async handleP2pPush(
     s: AuthSession,
     socket: WebSocket,
@@ -907,9 +996,9 @@ export class LatticeServer {
       files: prepared.fileCount,
       to: `${p.host}:${p.port}`
     })
-    // 异步执行：下载由对端发起，需本机服务端确认后才推送（接收端是发起方本机，已免确认）
+    // 异步执行：下载由对端发起，需本机服务端确认后才上传（下载端是发起方本机，已免确认）
     void (async () => {
-      // 断点续传：同会话已有发送记录 → 沿用既有授权，免二次确认
+      // 断点续传：同会话已有上传记录 → 沿用既有授权，免二次确认
       const isResume = p.resume === true && prepared.recId !== undefined
       if (!isResume) {
         const ok = await this.transfers.request({
@@ -955,8 +1044,8 @@ export class LatticeServer {
   }
 
   /**
-   * 接受推送后补建 P2P 接收记录（本机发起的下载在 prepareReceive 时已预建，不会走到这里）。
-   * resume 上下文保留接收目录：续传握手时 validateToken 的 resume 兜底分支读取 ctx.dir 重建授权。
+   * 接受对端上传后补建 P2P 下载记录（本机发起的下载在 prepareReceive 时已预建，不会走到这里）。
+   * resume 上下文保留下载目录：续传握手时 validateToken 的 resume 兜底分支读取 ctx.dir 重建授权。
    */
   private createRecvRecord(
     g: TransferGrantRecord,

@@ -4,6 +4,11 @@ import type { LoginResult, ServerEvent, ConnectionState, ConnectionInfo } from '
 
 export type { ConnectionInfo }
 
+/** 长耗时 RPC 的放宽超时（ms）：p2pPush 服务端要枚举完整个待传目录后才回复，大目录可能远超默认 30s */
+const LONG_RPC_TIMEOUT_MS: Record<string, number> = {
+  p2pPush: 10 * 60 * 1000
+}
+
 /**
  * 多连接管理器：每个连接拥有独立的 LatticeClient 实例，
  * 所有事件按连接 id 推送，渲染层据此渲染多选项卡。
@@ -100,10 +105,16 @@ export class ConnectionManager {
     return { ...info }
   }
 
-  request<T = unknown>(id: string, method: string, params: Record<string, unknown> = {}): Promise<T> {
+  request<T = unknown>(
+    id: string,
+    method: string,
+    params: Record<string, unknown> = {},
+    /** 不传时按方法取默认：p2pPush 等待对端枚举完整个文件夹后才回复，放宽到 10 分钟 */
+    timeoutMs?: number
+  ): Promise<T> {
     const c = this.clients.get(id)
     if (!c) return Promise.reject(new Error('连接不存在或已关闭'))
-    return c.request<T>(method, params)
+    return c.request<T>(method, params, timeoutMs ?? LONG_RPC_TIMEOUT_MS[method] ?? 30000)
   }
 
   async disconnect(id: string): Promise<boolean> {

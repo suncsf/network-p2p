@@ -407,6 +407,7 @@ async function downloadSelected(): Promise<void> {
       connId: props.connectionId,
       root: currentRoot.value,
       path: items[0].path,
+      paths: items.map((i) => i.path),
       name,
       size: totalSize,
       isDir: true
@@ -423,7 +424,7 @@ async function downloadSelected(): Promise<void> {
       })
       ElMessage.info(`已发起下载（${items.length} 个项目），对方确认后开始`)
     } catch (e) {
-      // 推送发起失败：把接收记录标记为已取消，避免面板残留「进行中」
+      // 下载发起失败：把下载记录标记为已取消，避免面板残留「进行中」
       await window.api.transfers.fail(prep.sessionId, (e as Error).message).catch(() => {})
       throw e
     }
@@ -441,7 +442,7 @@ interface P2pPrep {
   rename?: string
 }
 
-/** 发起 P2P 直连传输：服务端直接从磁盘分块推流到本机接收端口，不经命令通道、无大小限制 */
+/** 发起 P2P 直连传输：服务端直接从磁盘分块推流到本机下载端口，不经命令通道、无大小限制 */
 async function p2pPush(row: FileEntry, isDir: boolean): Promise<void> {
   const prep = (await window.api.p2p.prepareReceive({
     connId: props.connectionId,
@@ -464,7 +465,7 @@ async function p2pPush(row: FileEntry, isDir: boolean): Promise<void> {
     })) as { fileCount: number }
     ElMessage.info(`已发起下载（${r.fileCount} 个文件），对方确认后开始`)
   } catch (e) {
-    // 推送发起失败：把接收记录标记为已取消，避免面板残留「进行中」
+    // 下载发起失败：把下载记录标记为已取消，避免面板残留「进行中」
     await window.api.transfers.fail(prep.sessionId, (e as Error).message).catch(() => {})
     throw e
   }

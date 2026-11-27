@@ -19,10 +19,34 @@
             class="hint"
             type="info"
             :closable="false"
-            title="端口、传输接收策略（自动接收/需确认）等参数已统一移至「设置」页"
+            title="端口、下载策略（自动下载/需确认）等参数已统一移至「设置」页"
           />
           <el-button class="goto-settings" size="small" @click="emit('goSettings')">前往设置</el-button>
         </el-card>
+      </el-tab-pane>
+
+      <!-- 当前连接 -->
+      <el-tab-pane label="当前连接" name="sessions">
+        <div class="acc-toolbar">
+          <el-button @click="loadSessions">刷新</el-button>
+          <span class="session-count">共 {{ sessions.length }} 个连接</span>
+        </div>
+        <el-table v-if="sessions.length" :data="sessions" size="small">
+          <el-table-column prop="username" label="账户" width="160" />
+          <el-table-column prop="address" label="来源地址" width="180" />
+          <el-table-column label="登录时间" width="200">
+            <template #default="{ row }">{{ new Date(row.loginAt).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="最近活跃" width="200">
+            <template #default="{ row }">{{ new Date(row.lastSeen).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="状态">
+            <template #default>
+              <el-tag type="success" size="small">在线</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else :description="status.running ? '暂无客户端连接' : '服务端未运行，启动后客户端方可连接'" />
       </el-tab-pane>
 
       <!-- 账户 -->
@@ -163,10 +187,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { User } from '@element-plus/icons-vue'
-import type { AccountView, GrantView, AuditRow } from '@shared/models'
+import type { AccountView, GrantView, AuditRow, ServerSessionView } from '@shared/models'
 import PageIdBadge from '@renderer/components/PageIdBadge.vue'
 import { registerDialog, unregisterDialog } from '@renderer/composables/usePageRegistry'
 import {
@@ -191,6 +215,7 @@ watch(
   (v) => {
     if (v) {
       loadStatus()
+      loadSessions()
       loadAccounts()
       loadAudit()
     }
@@ -224,6 +249,20 @@ async function stop(): Promise<void> {
   ElMessage.info('服务端已停止')
   loadStatus()
 }
+
+/* ---------- 当前连接 ---------- */
+const sessions = ref<ServerSessionView[]>([])
+let unsubSessionEvent: (() => void) | null = null
+
+async function loadSessions(): Promise<void> {
+  sessions.value = (await window.api.server.listSessions()) as ServerSessionView[]
+}
+
+// 客户端登录/断开时实时刷新列表
+unsubSessionEvent = window.api.on('server:event', (ev) => {
+  const e = ev as { event?: string }
+  if (e.event === 'client:login' || e.event === 'client:logout') void loadSessions()
+})
 
 /* ---------- 账户 ---------- */
 const accounts = ref<AccountView[]>([])
@@ -383,8 +422,14 @@ async function loadAudit(): Promise<void> {
 
 onMounted(() => {
   loadStatus()
+  loadSessions()
   loadAccounts()
   loadAudit()
+})
+
+onUnmounted(() => {
+  unsubSessionEvent?.()
+  unsubSessionEvent = null
 })
 void PERMISSION_ALL
 </script>
@@ -431,6 +476,11 @@ void PERMISSION_ALL
 }
 .add-grant {
   margin-top: 8px;
+}
+.session-count {
+  color: #909399;
+  font-size: 13px;
+  align-self: center;
 }
 .pw-btn {
   margin-left: 8px;

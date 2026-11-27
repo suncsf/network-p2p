@@ -162,7 +162,7 @@ export interface TransferGrantParams {
   root: string
   path: string
   direction: 'send' | 'receive'
-  /** 上传方向（receive）的文件概要，供接收方确认卡片展示；可省略 */
+  /** 下载方向（receive，对方把文件传到本机）的文件概要，供本机确认卡片展示；可省略 */
   fileName?: string
   fileCount?: number
   totalSize?: number
@@ -192,25 +192,57 @@ export interface TransferDecisionParams {
   accept: boolean
 }
 
-/** P2P 传输进度事件（发送端/接收端都会广播） */
+/** P2P 传输进度事件（上传端/下载端都会广播） */
 export interface TransferProgressEvent {
   sessionId: string
   sent?: number
   total?: number
   done?: boolean
-  /** 接收方拒绝 / 确认超时 */
+  /** 下载方拒绝 / 确认超时 */
   cancelled?: boolean
   /** 传输中途失败（可续传） */
   failed?: boolean
   reason?: string
 }
 
+/* ------------------------------ IP 段检测 ------------------------------ */
+
+/** 本机网卡信息（工作区「IP 段检测」弹窗展示用） */
+export interface LocalNic {
+  /** 网卡名（如 以太网 / WLAN） */
+  name: string
+  /** 本机 IPv4 地址 */
+  address: string
+  /** 子网掩码（点分十进制） */
+  netmask: string
+  /** 由地址 + 掩码推导的网段 CIDR（如 192.168.1.0/24） */
+  cidr: string
+}
+
+/** 单个 IP 的探测结果 */
+export interface ProbeResult {
+  host: string
+  port: number
+  /** 服务端返回了确认数据 → 可连接 */
+  alive: boolean
+  /** 确认数据（可连接时有值） */
+  service?: { name: string; hostname: string; protocolVersion: number }
+  /** 不可连接原因（不可连接时有值） */
+  error?: string
+}
+
+/** IP 段探测参数：cidr 网段 + 服务端默认端口 */
+export interface ProbeRangeParams {
+  cidr: string
+  port: number
+}
+
 /* ------------------------------ 传输面板 ------------------------------ */
 
-/** 传输记录状态：进行中 / 已完成 / 已取消 / 已中断（可断点续传） */
-export type TransferState = 'active' | 'completed' | 'cancelled' | 'interrupted'
+/** 传输记录状态：进行中 / 已暂停（保留断点可继续）/ 已完成 / 已取消 / 已中断（可断点续传） */
+export type TransferState = 'active' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
 
-/** 传输记录类型：分块上传 / P2P 发送端 / P2P 接收端 / WS 接收（对方推送到本机共享目录） */
+/** 传输记录类型：上传（upload） / P2P 上传（p2p-send，本机 → 对端） / P2P 下载（p2p-recv，对端 → 本机） / 下载（ws-recv，对方推送到本机共享目录） */
 export type TransferKind = 'upload' | 'p2p-send' | 'p2p-recv' | 'ws-recv'
 
 /** 统一传输面板的一条记录（持久化在 local.db） */
@@ -223,7 +255,7 @@ export interface TransferRecord {
   name: string
   /** 源端路径（相对授权根目录） */
   remotePath: string
-  /** 本机路径（上传为源文件；接收为目标位置） */
+  /** 本机路径（上传为源文件；下载为目标位置） */
   localPath: string
   total: number
   transferred: number
