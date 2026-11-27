@@ -10,13 +10,14 @@ import { maskFromNames } from '@shared/permissions'
 let root: string
 let server: LatticeServer
 let manager: ConnectionManager
+let db: ReturnType<typeof openDatabase>
 const PORT = 47401
 
 beforeAll(async () => {
   root = mkdtempSync(path.join(tmpdir(), 'lattice-multi-'))
   const shared = path.join(root, 'share')
   mkdirSync(shared)
-  const db = openDatabase(path.join(root, 's.db'))
+  db = openDatabase(path.join(root, 's.db'))
   server = new LatticeServer(db, {
     wsPort: PORT,
     p2pPort: PORT + 1,
@@ -39,6 +40,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await manager.disconnectAll()
   await server.stop()
+  // Windows 下必须先关库再删目录，否则 SQLite 文件被占用（EPERM）
+  db.close()
   rmSync(root, { recursive: true, force: true })
 })
 

@@ -14,6 +14,7 @@ let sharedA: string
 let sharedB: string
 let server: LatticeServer
 let client: LatticeClient
+let db: ReturnType<typeof openDatabase>
 const WS_PORT = 47301
 const P2P_PORT = 47302
 
@@ -25,7 +26,7 @@ beforeAll(async () => {
   mkdirSync(sharedB)
   writeFileSync(path.join(sharedA, 'from-a.txt'), 'content-from-a-peer')
 
-  const db = openDatabase(path.join(root, 'srv.db'))
+  db = openDatabase(path.join(root, 'srv.db'))
   server = new LatticeServer(db, {
     wsPort: WS_PORT,
     p2pPort: P2P_PORT,
@@ -59,6 +60,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await client.disconnect()
   await server.stop()
+  // Windows 下必须先关库再删目录，否则 SQLite 文件被占用（EPERM）
+  db.close()
   rmSync(root, { recursive: true, force: true })
 })
 

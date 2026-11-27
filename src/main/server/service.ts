@@ -49,6 +49,8 @@ interface TransferGrantRecord {
   relPath: string
   direction: 'send' | 'receive'
   expiresAt: number
+  /** 本机用户主动发起的下载：发起时已选好保存位置，接收端免二次确认 */
+  preAuthorized?: boolean
 }
 
 export class LatticeServer {
@@ -68,6 +70,8 @@ export class LatticeServer {
   private settings: SettingsRepo
   private transfers: TransferManager
   private running = false
+  /** 本机 UI 事件钩子：服务端内部事件（如远端发起的下载待确认）转发给本机渲染层 */
+  onLocalEvent?: (ev: ServerEvent) => void
 
   constructor(
     private db: Db,
@@ -80,7 +84,10 @@ export class LatticeServer {
     this.settings = new SettingsRepo(db)
     this.transfers = new TransferManager(
       { p2pPort: config.p2pPort, confirmTimeoutMs: config.confirmTimeoutMs, autoAccept: config.autoAccept },
-      (ev) => this.broadcast(ev)
+      (ev) => {
+        this.broadcast(ev)
+        this.onLocalEvent?.(ev)
+      }
     )
   }
 
@@ -144,6 +151,11 @@ export class LatticeServer {
         const g = this.transferGrants.get(info.sessionId)
         if (!g) return false
         const rec = this.store?.getBySession(info.sessionId).find((r) => r.kind === 'p2p-recv')
+        // 本机用户主动发起的下载：发起时已选好保存位置，直接放行（确认权在对端服务端）
+        if (g.preAuthorized) {
+          if (rec) this.store?.update(rec.id, { total: info.totalSize })
+          return true
+        }
         // 断点续传：同会话记录存在且非进行中 → 沿用既有授权，免二次确认
         if (info.resume && rec && (rec.state === 'interrupted' || rec.state === 'cancelled')) {
           this.store?.update(rec.id, { state: 'active', error: null, total: info.totalSize })
@@ -484,7 +496,8 @@ export class LatticeServer {
       root,
       relPath: '',
       direction: 'receive',
-      expiresAt: Date.now() + 5 * 60 * 1000
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      preAuthorized: true
     })
     const host = this.listInterfaces()[0] ?? '127.0.0.1'
     return { p2pToken: token, host, port: this.config.p2pPort, sessionId: token }
@@ -727,25 +740,49 @@ export class LatticeServer {
     const items = await ops.collectForTransfer(p.root, p.path)
     let relPaths: string[] = items.map((f) => f.relPath)
     if (p.rename) relPaths = [p.rename]
-    // 异步推送，不阻塞命令通道
-    void this.executePush(
-      {
-        root: p.root,
-        path: p.path,
-        host: p.host,
-        port: Number(p.port),
-        sessionId: p.sessionId,
-        p2pToken: p.p2pToken,
-        rename: p.rename,
-        resume: p.resume === true,
-        username: s.username
-      },
-      {
-        recId: prepared.recId,
-        items: items.map((f, i) => ({ absPath: f.absPath, relPath: relPaths[i] })),
-        total: prepared.total
+    // 异步执行：下载由对端发起，需本机服务端确认后才推送（接收端是发起方本机，已免确认）
+    void (async () => {
+      // 断点续传：同会话已有发送记录 → 沿用既有授权，免二次确认
+      const isResume = p.resume === true && prepared.recId !== undefined
+      if (!isResume) {
+        const ok = await this.transfers.request({
+          sessionId: p.sessionId,
+          from: s.username,
+          fileName: p.rename ?? basename(p.path),
+          fileCount: prepared.fileCount,
+          totalSize: prepared.total
+        })
+        if (!ok) {
+          if (prepared.recId !== undefined) {
+            this.store?.update(prepared.recId, { state: 'cancelled', error: '已拒绝或确认超时' })
+          }
+          this.broadcast({
+            event: 'transfer:progress',
+            data: { sessionId: p.sessionId, cancelled: true, reason: '对方拒绝或确认超时' }
+          })
+          this.audit.log(s.username, 'p2p:push:fail', { root: p.root, path: p.path, error: '已拒绝或确认超时' })
+          return
+        }
       }
-    ).catch(() => {
+      await this.executePush(
+        {
+          root: p.root,
+          path: p.path,
+          host: p.host,
+          port: Number(p.port),
+          sessionId: p.sessionId,
+          p2pToken: p.p2pToken,
+          rename: p.rename,
+          resume: p.resume === true,
+          username: s.username
+        },
+        {
+          recId: prepared.recId,
+          items: items.map((f, i) => ({ absPath: f.absPath, relPath: relPaths[i] })),
+          total: prepared.total
+        }
+      )
+    })().catch(() => {
       /* 状态已在 executePush 内落库并广播 */
     })
   }

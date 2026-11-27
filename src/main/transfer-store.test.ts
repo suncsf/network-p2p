@@ -9,14 +9,18 @@ import type { TransferRecord } from '@shared/protocol'
 
 let dir: string
 let store: TransferStore
+let db: ReturnType<typeof openDatabase>
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), 'lattice-tstore-'))
-  const local = new LocalStore(openDatabase(path.join(dir, 'local.db')))
+  db = openDatabase(path.join(dir, 'local.db'))
+  const local = new LocalStore(db)
   store = new TransferStore(local.database)
 })
 
 afterEach(() => {
+  // Windows 下必须先关库再删目录，否则 SQLite 文件被占用（EPERM）
+  db.close()
   rmSync(dir, { recursive: true, force: true })
 })
 

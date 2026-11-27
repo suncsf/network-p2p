@@ -361,6 +361,19 @@ function setupClient(): void {
         n.on('click', () => createMainWindow())
         n.show()
         floaterWindow?.webContents.send('floater:alert')
+      } else if (ev.event === 'transfer:progress') {
+        // 对端发送方取消/失败时，把本机对应的接收记录从「进行中」落到终态，避免永久卡住
+        const d = ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string }
+        if (d.sessionId && (d.cancelled || d.failed)) {
+          for (const r of transfers.getBySession(d.sessionId)) {
+            if (r.kind === 'p2p-recv' && r.state === 'active') {
+              transfers.update(r.id, {
+                state: d.cancelled ? 'cancelled' : 'interrupted',
+                error: d.reason ?? (d.cancelled ? '对端已取消' : '对端传输失败')
+              })
+            }
+          }
+        }
       }
     }
   )
@@ -390,6 +403,21 @@ app.whenReady().then(() => {
   transfers.onChange = (rec) => sendToAll('transfer:updated', rec)
 
   server = new LatticeServer(userDb, serverConfig, transfers)
+
+  // 本机服务端事件（如远端发起的下载待确认）：本机渲染层不是自己服务端的 WS 客户端，
+  // 需要在主进程转发给渲染层，并弹系统通知 + 悬浮球闪烁提醒
+  server.onLocalEvent = (ev) => {
+    if (ev.event !== 'transfer:incoming') return
+    sendToAll('server:event', ev)
+    const d = ev.data as { from?: string; fileCount?: number }
+    const n = new Notification({
+      title: '收到下载请求',
+      body: `来自 ${d.from ?? '未知'}，共 ${d.fileCount ?? 1} 个文件，请在「传输」面板确认`
+    })
+    n.on('click', () => createMainWindow())
+    n.show()
+    floaterWindow?.webContents.send('floater:alert')
+  }
 
   setupClient()
 

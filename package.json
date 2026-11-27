@@ -12,7 +12,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev --noSandbox",
+    "dev": "electron-vite dev --watch --noSandbox",
     "build": "electron-vite build",
     "preview": "electron-vite preview --noSandbox",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",

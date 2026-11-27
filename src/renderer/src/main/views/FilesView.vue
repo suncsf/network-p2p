@@ -322,28 +322,12 @@ function joinPath(base: string, name: string): string {
 }
 
 async function download(row: FileEntry): Promise<void> {
-  // 大文件走 P2P 直连（保存对话框选目标路径），避免命令通道整文件载入内存
-  if (row.size > 8 * 1024 * 1024) {
-    try {
-      await p2pPush(row, false)
-    } catch (e) {
-      const msg = (e as Error).message
-      if (msg !== 'CANCELLED') ElMessage.error(`P2P 下载失败：${msg}`)
-    }
-    return
-  }
+  // 统一走 P2P 直连（保存对话框选目标路径）：有传输记录、有进度、支持断点续传，不整文件载入内存
   try {
-    const r = (await window.api.client.request(props.connectionId, 'readFile', {
-      root: currentRoot.value,
-      path: row.path
-    })) as { data: string }
-    // 通过浏览器下载
-    const link = document.createElement('a')
-    link.href = `data:application/octet-stream;base64,${r.data}`
-    link.download = row.name
-    link.click()
+    await p2pPush(row, false)
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    const msg = (e as Error).message
+    if (msg !== 'CANCELLED') ElMessage.error(`下载失败：${msg}`)
   }
 }
 
@@ -392,7 +376,7 @@ async function p2pPush(row: FileEntry, isDir: boolean): Promise<void> {
     size: row.size,
     isDir
   })) as P2pPrep
-  ElMessage.info(`等待接收方确认…（目标 ${prep.host}:${prep.port}）`)
+  ElMessage.info('已发起下载，等待对方（服务端）确认后开始')
   try {
     const r = (await window.api.client.request(props.connectionId, 'p2pPush', {
       root: currentRoot.value,
@@ -403,7 +387,7 @@ async function p2pPush(row: FileEntry, isDir: boolean): Promise<void> {
       sessionId: prep.sessionId,
       rename: prep.rename
     })) as { fileCount: number }
-    ElMessage.info(`已发起 P2P 直连传输（${r.fileCount} 个文件），接收方确认后开始`)
+    ElMessage.info(`已发起下载（${r.fileCount} 个文件），对方确认后开始`)
   } catch (e) {
     // 推送发起失败：把接收记录标记为已取消，避免面板残留「进行中」
     await window.api.transfers.fail(prep.sessionId, (e as Error).message).catch(() => {})

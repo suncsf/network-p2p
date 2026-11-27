@@ -14,6 +14,7 @@ let shared: string
 let server: LatticeServer
 let client: LatticeClient
 let login: import('@shared/protocol').LoginResult
+let db: ReturnType<typeof openDatabase>
 const WS_PORT = 47201
 const P2P_PORT = 47202
 
@@ -25,7 +26,7 @@ beforeAll(async () => {
   mkdirSync(path.join(shared, 'docs'))
 
   dbFile = path.join(root, 'server.db')
-  const db = openDatabase(dbFile)
+  db = openDatabase(dbFile)
   server = new LatticeServer(db, {
     wsPort: WS_PORT,
     p2pPort: P2P_PORT,
@@ -67,6 +68,8 @@ afterAll(async () => {
     /* ignore */
   }
   await server.stop()
+  // Windows 下必须先关库再删目录，否则 SQLite 文件被占用（EPERM）
+  db.close()
   rmSync(root, { recursive: true, force: true })
 })
 
