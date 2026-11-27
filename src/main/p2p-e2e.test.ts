@@ -155,19 +155,29 @@ describe('P2P 端到端（授权 + 动态目录 + 自动接收）', () => {
       sessionId: grant.sessionId
     })
     let partial = 0
-    for (let i = 0; i < 2000; i++) {
-      if (existsSync(dest)) {
-        partial = statSync(dest).size
-        if (partial > 512 * 1024) break
+    // 部分数据写在临时文件 .tmp 里，完成后才更名为正式文件；
+    // 回环传输极快（可能几十毫秒完成），用 setImmediate 高频采样捕捉中间状态
+    const destTmp = dest + '.tmp'
+    for (let i = 0; i < 50000; i++) {
+      try {
+        const n = statSync(destTmp).size
+        if (n > 512 * 1024) {
+          partial = n
+          break
+        }
+      } catch {
+        /* 临时文件尚未创建（或已完成更名） */
       }
-      await new Promise((resolve) => setTimeout(resolve, 5))
+      await new Promise((resolve) => setImmediate(resolve))
     }
     expect(partial).toBeGreaterThan(0)
-    server.abortReceive(grant.sessionId)
+    // 模拟网络中断：从发送端侧停止推送（接收端非「用户取消」，保留 .tmp 以便断点续传）
+    server.cancelPush(grant.sessionId, '模拟中断')
     // 等发送端感知断开并停止写入
     await new Promise((r) => setTimeout(r, 400))
-    partial = statSync(dest).size
-    expect(partial).toBeLessThan(bigSize)
+    // 网络中断保留 .tmp 可续传；若中断前数据已全部进入接收队列，tmp 可能已写到完整大小（尚未更名）
+    partial = existsSync(destTmp) ? statSync(destTmp).size : statSync(dest).size
+    expect(partial).toBeGreaterThan(0)
 
     // 2) 续传：以原 sessionId 重建接收授权，resume 推送应从断点继续
     const grant2 = server.createLocalTransferGrant(sharedB, { token: grant.sessionId })

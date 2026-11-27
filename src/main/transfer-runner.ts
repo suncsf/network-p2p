@@ -114,6 +114,8 @@ interface RecvResume {
   paths?: string[]
   dir: string
   rename?: string
+  /** 重名冲突选择「重命名」时的本地名称映射（续传重建授权时需原样携带） */
+  renameMap?: Record<string, string>
   isDir: boolean
   name: string
 }

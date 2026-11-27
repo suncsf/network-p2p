@@ -53,6 +53,28 @@ function getIcon(): Electron.NativeImage {
   return nativeImage.createEmpty()
 }
 
+/** 重名冲突选择「重命名」时生成不重复的新名称：文件保留扩展名（如「a (1).txt」），目录为「a (1)」 */
+function uniqueTargetName(dir: string, target: string, taken: Record<string, string>): string {
+  const segs = target.replace(/\\/g, '/').split('/')
+  const name = segs.pop() as string
+  let isDir = false
+  try {
+    isDir = statSync(join(dir, target)).isDirectory()
+  } catch {
+    /* 目标不存在按文件处理 */
+  }
+  const dot = isDir ? -1 : name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  let i = 1
+  for (;;) {
+    const newName = `${stem} (${i})${ext}`
+    const mapped = [...segs, newName].join('/')
+    if (!existsSync(join(dir, ...segs, newName)) && !Object.values(taken).includes(mapped)) return mapped
+    i++
+  }
+}
+
 function createFloater(): void {
   const state = local.getWindowState('floater') as { x?: number; y?: number } | undefined
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
@@ -107,7 +129,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: true,
-    title: 'v-Lattice',
+    title: 'V-Lattice',
     icon: getIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -166,7 +188,7 @@ function sendToAll(channel: string, payload: unknown): void {
 
 function createTray(): void {
   tray = new Tray(getIcon())
-  tray.setToolTip('v-Lattice')
+  tray.setToolTip('V-Lattice')
   const menu = Menu.buildFromTemplate([
     { label: '显示主界面', click: () => createMainWindow() },
     {
@@ -355,17 +377,40 @@ function registerIpc(): void {
       }
       let localDir: string
       let rename: string | undefined
+      let renameMap: Record<string, string> | undefined
       if (p.isDir) {
         const r = await dialog.showOpenDialog({ title: '选择下载目录', properties: ['openDirectory', 'createDirectory'] })
         if (r.canceled || r.filePaths.length === 0) throw new Error('CANCELLED')
         localDir = r.filePaths[0]
+        // 重名冲突检查：目标目录已存在同名项目时询问「覆盖 / 重命名 / 取消」
+        // （单文件下载走系统保存对话框，已自带覆盖确认）
+        const targets = p.paths?.length ? p.paths : [p.path]
+        const conflicts = targets.filter((t) => t && existsSync(join(localDir, t)))
+        if (conflicts.length > 0) {
+          const shown = conflicts.slice(0, 8).join('\n') + (conflicts.length > 8 ? `\n… 共 ${conflicts.length} 项` : '')
+          const r = await dialog.showMessageBox({
+            type: 'warning',
+            title: '同名文件冲突',
+            message: `保存位置已存在同名项目：\n${shown}`,
+            detail: '「覆盖」将替换已有文件；「重命名」将自动保存为新名称（如「名称 (1)」）。',
+            buttons: ['覆盖', '重命名', '取消'],
+            defaultId: 0,
+            cancelId: 2,
+            noLink: true
+          })
+          if (r.response === 2) throw new Error('CANCELLED')
+          if (r.response === 1) {
+            renameMap = {}
+            for (const t of conflicts) renameMap[t] = uniqueTargetName(localDir, t, renameMap)
+          }
+        }
       } else {
         const r = await dialog.showSaveDialog({ title: '保存到', defaultPath: p.name })
         if (r.canceled || !r.filePath) throw new Error('CANCELLED')
         localDir = dirname(r.filePath)
         rename = basename(r.filePath)
       }
-      const grant = server.createLocalTransferGrant(localDir)
+      const grant = server.createLocalTransferGrant(localDir, { renameMap })
       const peer = connections.get(p.connId)?.username ?? '远端'
       transfers.create({
         kind: 'p2p-recv',
@@ -387,11 +432,12 @@ function registerIpc(): void {
           paths: p.paths,
           dir: localDir,
           rename,
+          renameMap,
           isDir: p.isDir,
           name: p.name
         })
       })
-      return { ...grant, rename }
+      return { ...grant, rename, renameMap }
     }
   )
 

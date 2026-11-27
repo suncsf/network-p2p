@@ -44,8 +44,9 @@
 | 最近连接删除 | [历史连接管理.md](历史连接管理.md) | 历史记录可删（二次确认+history.remove 连密码删）；点击仅填表单，去掉一键直连 |
 | Electron菜单 | [移除应用菜单.md](移除应用菜单.md) | Menu.setApplicationMenu(null) 去掉顶部默认菜单；托盘/悬浮球自定义菜单不受影响，DevTools/刷新快捷键随菜单失效 |
 | setApplicationMenu | [移除应用菜单.md](移除应用菜单.md) | app.whenReady 开头置 null 即可，Win/Linux 通用 |
-| 软件更名 | [软件更名.md](软件更名.md) | Lattice → v-Lattice：窗口标题/托盘/品牌名/页面标题/包名/打包产物名/README 共 9 处文件 |
-| v-Lattice | [软件更名.md](软件更名.md) | 新软件名；userData 目录、appId、内部类名有意保留旧名防数据丢失/升级断裂 |
+| 软件更名 | [软件更名.md](软件更名.md) | Lattice → v-Lattice → V-Lattice：两轮更名，窗口标题/托盘/品牌名/页面标题/打包产物名/README 同步 |
+| v-Lattice | [软件更名.md](软件更名.md) | 曾用显示名（2026-11-27 上午）；userData 目录、appId、内部类名有意保留旧名防数据丢失/升级断裂 |
+| V-Lattice | [软件更名.md](软件更名.md) | 现行软件名（v-Lattice 首字母大写规范修正，9 文件 12 处）；协议标识 `service:'v-lattice'` 与 npm 包名小写保留 |
 | 接收传输记录 | [接收传输记录.md](接收传输记录.md) | 对方推送只弹确认不落记录；接收方向补建传输记录，传输面板可见 |
 | ws-recv | [接收传输记录.md](接收传输记录.md) | 新传输类型：WS 上传推送的接收记录；uploadInit 建、chunk 回写进度、finish/abort/close 同步状态 |
 | uploadRecs | [接收传输记录.md](接收传输记录.md) | uploadId→记录 id 映射；base64 长度换算落盘字节（含 padding 修正）回写进度 |
@@ -86,6 +87,13 @@
 | net-probe | [IP段检测.md](IP段检测.md) | 新建探测模块：localNics 网卡识别/CIDR 推导、expandRange 网段展开（宽掩码收敛 /24）、probeHost HTTP 探测（校验 service=v-lattice）、probeRange 每批 32 并发 |
 | 探测确认数据 | [IP段检测.md](IP段检测.md) | 服务端 HTTP server 对非 WS 升级请求返回 `{ service:'v-lattice', hostname, protocolVersion }`；只有收到确认数据才判可连接，端口开放但服务不匹配不误报 |
 | workspace::ip-scan | [IP段检测.md](IP段检测.md) | 检测弹窗固定 ID a001b002；新建连接弹窗 IP 输入框 append 槽「检测」按钮，双击可连接行回填 host/port 并关窗 |
+| 重名冲突提示 | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | 目录/批量下载保存位置重名时三选一：覆盖/重命名(自动 a (1).txt)/取消；单文件走系统对话框原生确认 |
+| tmp临时文件 | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | P2P+WS 接收端先写 正式名.tmp，DONE 后统一更名；续传偏移改按 .tmp 大小计算 |
+| 完成更名 | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | 覆盖语义=先 rm 同名旧文件再 rename（Windows rename 不覆盖）；零字节文件完成时补建 |
+| 取消清理 | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | abortReceive=用户取消→markCancelled+close 后删 .tmp；网络中断/cancelPush 保留断点，语义正式分离 |
+| 帧串行化 | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | 产品级 bug：async onFrame 不等待，小文件 CHUNK+DONE 并发处理致更名永远不执行；改 frameQueue 串行链 + close 收尾挂队列后 |
+| renameMap | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | 重命名映射存授权+续传上下文；接收端 mapRelPath 最长前缀匹配重定向写入路径，目录级整体改名 |
+| 中断模拟cancelPush | [传输临时文件与重名处理.md](传输临时文件与重名处理.md) | 测试模拟网络中断应走发送端 cancelPush（保留 .tmp）；abortReceive 现为取消语义会删断点；发送端 completed ≠ 接收端落盘，断言需轮询 |
 
 ## 当日要点
 
@@ -170,3 +178,16 @@
 - 新增 IP 段检测服务功能（工作区「新建连接」弹窗）：IP 输入框 append 槽「检测」按钮 → 检测弹窗自动识别本机网卡生成网段（多网卡可选）→ 对网段内全部 IP 的默认端口并发探测 → 服务端对探测请求返回确认数据 `{ service:'v-lattice', hostname, protocolVersion }`，收到确认才判「可连接」→ 双击可连接行回填表单并关窗。
 - 新建 `src/main/net-probe.ts`（localNics/expandRange/probeHost/probeRange，宽掩码收敛 /24、每批 32 并发、1.2s 超时、具体失败原因落表）；shared/protocol.ts 增 LocalNic/ProbeResult/ProbeRangeParams；service.ts http server 加确认响应；index.ts 注册 net:localNics/net:probe；preload 暴露 api.net；usePageRegistry 登记 workspace::ip-scan=a001b002。
 - typecheck 0 错误；测试 54/55（S8 暂停用例为 700ms 时序抖动，单独重跑通过，与本功能无关）；改动未提交 git。
+
+### 第十一轮（同日）
+
+- 显示名大小写规范修正：`v-Lattice` → `V-Lattice`，9 文件 12 处（主窗口标题、托盘 tooltip、App.vue 品牌名、WorkspaceView 探测结果文案、net-probe 报错文案、index/floater 页面标题、package.json description/author.name、electron-builder.yml productName/copyright/maintainer、README 标题）。
+- 有意保留：协议线上标识 `service:'v-lattice'`（service.ts ↔ net-probe.ts 两侧一致，非用户可见）、npm 包名小写 `v-lattice`（npm 规范）、记忆库历史归档（追加不覆盖）。
+- 纯大小写替换，无逻辑变更；改动未提交 git。
+
+### 第十二轮（同日）
+
+- 落地三项传输收尾需求：① 下载端保存位置重名冲突三选一（覆盖/重命名/取消，uniqueTargetName 生成 `a (1).txt` 式新名）；② P2P+WS 接收端先写 `.tmp` 临时文件、DONE 后统一更名（覆盖=先删旧文件再 rename），续传偏移改按 `.tmp` 大小；③ 用户取消传输删除已生成的 `.tmp`。
+- 顺带修复产品级 bug「帧处理未串行化」：FrameParser 对 async onFrame 不等待，小文件 CHUNK+DONE 同批并发处理，DONE 的更名在落盘前执行导致**小文件传完正式文件不出现**（旧代码直写正式文件故未暴露）；改 frameQueue 串行链，close 收尾挂队列之后。
+- 语义分离确认：abortReceive（面板取消）= 删 `.tmp`；cancelPush/网络中断 = 保留断点。发送端 completed ≠ 接收端落盘（滞后约 13ms），测试断言最终文件须轮询；回环 12MB 可在 5ms 轮询间隔内完成，需 setImmediate 高频采样。
+- 测试同步更新（p2p-e2e + transfer-resume：中断模拟改 cancelPush、.tmp 轮询、waitFinal、S8/S9 稳定等待、S6 状态断言 cancelled）；typecheck 0 错误、55 项测试全绿（连续两轮）；改动未提交 git。
