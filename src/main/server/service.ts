@@ -337,7 +337,18 @@ export class LatticeServer {
     }
     this.reply(socket, req.id, true, result)
     this.audit.log(acc.username, 'login:ok', {})
+    // 通知本机 UI：有客户端连上了服务端
+    this.onLocalEvent?.({
+      event: 'client:login',
+      data: { username: acc.username, address: this.remoteAddress(socket) }
+    })
     return session
+  }
+
+  /** 客户端来源地址（去掉 IPv6 映射前缀 ::ffff:） */
+  private remoteAddress(socket: WebSocket): string {
+    const addr = (socket as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress ?? ''
+    return addr.replace(/^::ffff:/, '') || '未知地址'
   }
 
   private checker(s: AuthSession): PermissionChecker {
