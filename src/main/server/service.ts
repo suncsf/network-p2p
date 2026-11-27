@@ -139,13 +139,32 @@ export class LatticeServer {
         const g = this.transferGrants.get(sessionId)
         return g?.root
       },
-      validateToken: (token) => {
+      validateToken: (token, resume) => {
         const g = this.transferGrants.get(token)
         if (g && g.expiresAt > Date.now()) {
           // 滑动续期：每次成功握手延长授权，长传输/续传不受初始 5 分钟限制
           g.expiresAt = Date.now() + 5 * 60 * 1000
+          return true
         }
-        return !!g && g.expiresAt > Date.now()
+        // 续传兜底：发送端单方面点续传时，接收端授权可能已过期。
+        // 同会话接收记录存在且未完成 → 从记录上下文自动重建授权（一次性 token 本身即凭证）
+        if (resume) {
+          const rec = this.store?.getBySession(token).find((r) => r.kind === 'p2p-recv')
+          if (rec && rec.state !== 'completed') {
+            try {
+              const ctx = JSON.parse(this.store?.getResume(rec.id) ?? '{}') as { dir?: string }
+              if (ctx.dir) {
+                this.createLocalTransferGrant(ctx.dir, { token })
+                this.store?.update(rec.id, { state: 'active', error: null })
+                this.audit.log(null, 'transfer:auto-resume-grant', { sessionId: token })
+                return true
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        return false
       },
       requestConfirm: async (info) => {
         const g = this.transferGrants.get(info.sessionId)

@@ -214,8 +214,8 @@ export interface P2PReceiveOptions {
   baseDir: string
   /** 根据会话动态解析接收根目录（例如按 transfer grant 的账户目录） */
   resolveBaseDir?: (sessionId: string) => string | undefined
-  /** 校验 token 是否有效 */
-  validateToken: (token: string) => boolean
+  /** 校验 token 是否有效（resume=true 表示这是续传连接，可走兜底重建授权） */
+  validateToken: (token: string, resume: boolean) => boolean
   /** 请求接收确认；返回是否接受（resume=true 表示这是续传连接） */
   requestConfirm: (info: {
     fileName: string
@@ -298,9 +298,9 @@ export function createReceiveServer(opts: P2PReceiveOptions): net.Server {
             sessionId: string
             resume?: boolean
           }
-          tokenValid = opts.validateToken(hello.token)
           sessionId = hello.sessionId
           resumeMode = hello.resume === true
+          tokenValid = opts.validateToken(hello.token, resumeMode)
           if (!tokenValid) {
             await writeFrame(socket, P2PFrameType.ERROR, encodeError('TRANSFER_DENIED', '无效 token'))
             socket.end()
