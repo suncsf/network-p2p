@@ -22,6 +22,10 @@ export interface StartUploadParams {
 
 interface UploadResume {
   connId: string
+  /** 原连接端点：重启后 connId 失效时按此匹配现存连接续传 */
+  host?: string
+  port?: number
+  username?: string
   root: string
   path: string
   filePath: string
@@ -32,6 +36,10 @@ interface UploadResume {
 
 interface RecvResume {
   connId: string
+  /** 原连接端点：重启后 connId 失效时按此匹配现存连接续传 */
+  host?: string
+  port?: number
+  username?: string
   root: string
   path: string
   dir: string
@@ -71,13 +79,39 @@ export class TransferRunner {
     return this.conns.get(connId)?.state === 'connected'
   }
 
+  /**
+   * 解析可用于续传的连接：优先原 connId；连接断开（如应用重启后 id 变化）
+   * 时按 host/port/username 匹配现存连接，最后按对端用户名兜底匹配。
+   */
+  private resolveConn(
+    r: { connId?: string; host?: string; port?: number; username?: string },
+    peer?: string
+  ): string | null {
+    if (r.connId && this.connected(r.connId)) return r.connId
+    const all = this.conns.list().filter((c) => c.state === 'connected')
+    const hit =
+      all.find(
+        (c) =>
+          r.host !== undefined &&
+          r.port !== undefined &&
+          c.host === r.host &&
+          c.port === r.port &&
+          c.username === r.username
+      ) ?? all.find((c) => peer !== undefined && c.username === peer)
+    return hit?.id ?? null
+  }
+
   /* ------------------------------ 上传 ------------------------------ */
 
   /** 发起上传：创建记录并异步执行，立即返回记录（进度通过 transfer:updated 推送） */
   startUpload(p: StartUploadParams): Rec {
     const peer = p.peer || this.conns.get(p.connId)?.username || '远端'
+    const info = this.conns.get(p.connId)
     const resume: UploadResume = {
       connId: p.connId,
+      host: info?.host,
+      port: info?.port,
+      username: info?.username,
       root: p.root,
       path: p.path,
       filePath: p.filePath,
@@ -107,7 +141,10 @@ export class TransferRunner {
     const job = { aborted: false }
     this.jobs.set(recId, job)
     try {
-      await this.uploadLoop(recId, r, job)
+      // 原连接可能已失效（重启后 id 变化）：按端点信息匹配现存连接
+      const connId = this.resolveConn(r, rec.peer)
+      if (!connId) throw new Error('没有可用的连接，无法上传，请重新连接后重试')
+      await this.uploadLoop(recId, r, job, connId)
       this.store.update(recId, { state: 'completed', transferred: r.size, error: null })
       this.onDone?.({ ok: true, name: rec.name })
     } catch (e) {
@@ -128,7 +165,7 @@ export class TransferRunner {
     }
   }
 
-  private async uploadLoop(recId: number, r: UploadResume, job: { aborted: boolean }): Promise<void> {
+  private async uploadLoop(recId: number, r: UploadResume, job: { aborted: boolean }, connId: string): Promise<void> {
     // 源文件仍需存在且足够大
     let localSize = r.size
     try {
@@ -143,7 +180,7 @@ export class TransferRunner {
       let offset = r.offset ?? 0
       let uploadId = r.uploadId
       if (!uploadId) {
-        const res = (await this.conns.request(r.connId, 'uploadInit', {
+        const res = (await this.conns.request(connId, 'uploadInit', {
           root: r.root,
           path: r.path,
           size: r.size
@@ -159,7 +196,7 @@ export class TransferRunner {
         const buf = Buffer.alloc(len)
         await fh.read(buf, 0, len, offset)
         try {
-          await this.conns.request(r.connId, 'uploadChunk', {
+          await this.conns.request(connId, 'uploadChunk', {
             uploadId,
             offset,
             data: buf.toString('base64')
@@ -169,7 +206,7 @@ export class TransferRunner {
           const code = (e as { code?: string }).code
           if (code === 'NOT_FOUND' || msg.includes('未知上传')) {
             // 服务端不认识该上传（可能重启过）：从头重新初始化
-            const res = (await this.conns.request(r.connId, 'uploadInit', {
+            const res = (await this.conns.request(connId, 'uploadInit', {
               root: r.root,
               path: r.path,
               size: r.size
@@ -189,7 +226,7 @@ export class TransferRunner {
           this.store.updateProgress(recId, offset, r.size)
         }
       }
-      await this.conns.request(r.connId, 'uploadFinish', { uploadId })
+      await this.conns.request(connId, 'uploadFinish', { uploadId })
     } finally {
       await fh.close()
     }
@@ -243,24 +280,27 @@ export class TransferRunner {
 
     if (rec.kind === 'upload') {
       const r = JSON.parse(resumeJson) as UploadResume
-      if (!this.connected(r.connId)) {
-        throw new Error('原连接已断开，无法续传，请重新发起上传')
+      const connId = this.resolveConn(r, rec.peer)
+      if (!connId) {
+        throw new Error('没有可用的连接，无法续传，请重新连接后重试')
       }
-      this.store.update(id, { state: 'active', error: null })
+      r.connId = connId
+      this.store.update(id, { state: 'active', error: null, resume: JSON.stringify(r) })
       void this.runUpload(id).catch(() => {})
       return
     }
 
     if (rec.kind === 'p2p-recv') {
       const r = JSON.parse(resumeJson) as RecvResume
-      if (!this.connected(r.connId)) {
-        throw new Error('原连接已断开，无法续传，请在文件页重新发起')
+      const connId = this.resolveConn(r, rec.peer)
+      if (!connId) {
+        throw new Error('没有可用的连接，无法续传，请重新连接后重试')
       }
       // 用原 sessionId 重建接收授权（免对话框），对端可按原会话续传
       const grant = this.server.createLocalTransferGrant(r.dir, { token: rec.sessionId })
       this.store.update(id, { state: 'active', error: null })
       try {
-        await this.conns.request(r.connId, 'p2pPush', {
+        await this.conns.request(connId, 'p2pPush', {
           root: r.root,
           path: r.path,
           host: grant.host,

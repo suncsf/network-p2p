@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { createServer, type Server } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { basename } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { generateToken, verifyPassword } from './auth'
 import { AccountRepo, AuditRepo, SettingsRepo } from './repo'
@@ -19,7 +20,8 @@ import type {
   RpcResponse,
   ServerEvent,
   LoginResult,
-  FileRootGrant
+  FileRootGrant,
+  TransferGrantParams
 } from '@shared/protocol'
 import { createReceiveServer, sendFiles } from '@main/p2p/transfer'
 import net from 'node:net'
@@ -59,6 +61,8 @@ export class LatticeServer {
   private p2pServer?: net.Server
   private sessions = new Map<string, AuthSession>()
   private transferGrants = new Map<string, TransferGrantRecord>()
+  /** WS 上传已确认缓存：key 为 accountId:root:path，值为止步时间；5 分钟内重试/重初始化免二次确认 */
+  private wsUploadApproved = new Map<string, number>()
   /** 进行中的 P2P 推送任务（sessionId → 任务），支持取消 */
   private pushJobs = new Map<string, { aborted: boolean }>()
   /** 发送端进度节流（sessionId → 上次百分比） */
@@ -415,6 +419,12 @@ export class LatticeServer {
           this.reply(socket, req.id, true, {})
           break
         case 'uploadInit': {
+          // 接收策略：落盘前先征求本机用户同意（拒绝/超时则整个上传被拒）。
+          // 同一账户对同一路径 5 分钟内已确认过则免重复确认（中断重初始化不二次弹窗）
+          const ok = await this.ensureUploadAccepted(s, p.root, p.path, p.size)
+          if (!ok) {
+            throw Object.assign(new Error('对方拒绝或确认超时'), { code: 'FORBIDDEN' })
+          }
           const r = await ops.createUpload(p.root, p.path)
           this.reply(socket, req.id, true, r)
           break
@@ -480,8 +490,32 @@ export class LatticeServer {
     }
   }
 
+  /** WS 上传确认：接收策略为「需要确认」时征求本机用户同意；已确认过且未过期则直接放行 */
+  private async ensureUploadAccepted(
+    s: AuthSession,
+    root: string,
+    path: string,
+    size?: number
+  ): Promise<boolean> {
+    const key = `${s.accountId}:${root}:${path}`
+    const approvedAt = this.wsUploadApproved.get(key)
+    if (approvedAt && Date.now() - approvedAt < 5 * 60 * 1000) {
+      this.wsUploadApproved.set(key, Date.now()) // 滑动续期：传输进行中不弹二次确认
+      return true
+    }
+    const ok = await this.transfers.request({
+      sessionId: `ws-upload:${randomUUID()}`,
+      from: s.username,
+      fileName: basename(path) || path,
+      fileCount: 1,
+      totalSize: Number(size ?? 0)
+    })
+    if (ok) this.wsUploadApproved.set(key, Date.now())
+    return ok
+  }
+
   private async handleTransferGrant(s: AuthSession, socket: WebSocket, req: RpcRequest): Promise<void> {
-    const p = req.params as { root: string; path: string; direction: 'send' | 'receive' }
+    const p = req.params as TransferGrantParams
     const g = s.grants.get(p.root)
     if (!g) throw Object.assign(new Error('未知根目录'), { code: 'FORBIDDEN' })
     const mask = resolvePermission(g.nodes, p.path)
@@ -490,13 +524,30 @@ export class LatticeServer {
       throw Object.assign(new Error('无传输权限'), { code: 'FORBIDDEN' })
     }
     const token = generateToken()
+    let preAuthorized = false
+    // 接收方向（对方要往本机推文件）：授权时先确认，接受后才发 token，
+    // 并标记预授权——发送方连接进来不再二次确认，无需挂连接等待
+    if (p.direction === 'receive') {
+      const ok = await this.transfers.request({
+        sessionId: token,
+        from: s.username,
+        fileName: p.fileName ?? basename(p.path),
+        fileCount: p.fileCount ?? 1,
+        totalSize: p.totalSize ?? 0
+      })
+      if (!ok) {
+        throw Object.assign(new Error('对方拒绝或确认超时'), { code: 'FORBIDDEN' })
+      }
+      preAuthorized = true
+    }
     this.transferGrants.set(token, {
       token,
       accountId: s.accountId,
       root: p.root,
       relPath: p.path,
       direction: p.direction,
-      expiresAt: Date.now() + 5 * 60 * 1000
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      preAuthorized
     })
     const host = this.listInterfaces()[0] ?? '127.0.0.1'
     this.reply(socket, req.id, true, {

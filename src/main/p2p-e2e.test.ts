@@ -192,3 +192,74 @@ describe('P2P 端到端（授权 + 动态目录 + 自动接收）', () => {
     expect(size).toBe(bigSize)
   })
 })
+
+describe('接收策略确认（autoAccept=false：未确认必须拒绝，不能直接落盘）', () => {
+  const WS2 = 47311
+  const P2P2 = 47312
+  let srv: LatticeServer
+  let cli: LatticeClient
+  let db2: ReturnType<typeof openDatabase>
+  let dir: string
+
+  beforeAll(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), 'lattice-confirm-'))
+    db2 = openDatabase(path.join(dir, 'srv.db'))
+    srv = new LatticeServer(db2, {
+      wsPort: WS2,
+      p2pPort: P2P2,
+      confirmTimeoutMs: 400, // 短超时：测试快速走「确认超时 → 拒绝」路径
+      autoAccept: false,
+      lockAfter: 5,
+      lockMs: 60000
+    })
+    const accId = srv.accountRepo.create('carol', 'pw123456')
+    srv.accountRepo.addGrant(
+      accId,
+      dir,
+      'C',
+      maskFromNames(['READ', 'WRITE', 'UPLOAD', 'DOWNLOAD', 'TRANSFER'])
+    )
+    await srv.start()
+    cli = new LatticeClient(
+      () => {},
+      () => {}
+    )
+    await cli.connect({ host: '127.0.0.1', port: WS2, username: 'carol', password: 'pw123456' })
+  })
+
+  afterAll(async () => {
+    await cli.disconnect()
+    await srv.stop()
+    db2.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('WS 上传 uploadInit 未确认被拒（FORBIDDEN），不落盘', async () => {
+    await expect(
+      cli.request('uploadInit', { root: dir, path: 'no-confirm.bin', size: 10 })
+    ).rejects.toThrow(/拒绝|超时|FORBIDDEN/)
+    expect(existsSync(path.join(dir, 'no-confirm.bin'))).toBe(false)
+  })
+
+  it('接收方向 transferGrant 未确认被拒（FORBIDDEN），不发 token', async () => {
+    await expect(
+      cli.request<TransferGrantResult>('transferGrant', {
+        root: dir,
+        path: '',
+        direction: 'receive',
+        fileName: 'x.bin',
+        fileCount: 1,
+        totalSize: 10
+      })
+    ).rejects.toThrow(/拒绝|超时|FORBIDDEN/)
+  })
+
+  it('下载方向 transferGrant（send）不经过接收确认，正常发 token', async () => {
+    const grant = await cli.request<TransferGrantResult>('transferGrant', {
+      root: dir,
+      path: '',
+      direction: 'send'
+    })
+    expect(grant.p2pToken).toBeTruthy()
+  })
+})

@@ -162,6 +162,10 @@ export interface TransferGrantParams {
   root: string
   path: string
   direction: 'send' | 'receive'
+  /** 上传方向（receive）的文件概要，供接收方确认卡片展示；可省略 */
+  fileName?: string
+  fileCount?: number
+  totalSize?: number
 }
 
 export interface TransferGrantResult {
