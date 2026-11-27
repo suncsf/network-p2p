@@ -60,6 +60,7 @@ const api = {
     openMain: () => ipcRenderer.invoke('window:openMain'),
     closeFloater: () => ipcRenderer.invoke('window:closeFloater'),
     showFloater: () => ipcRenderer.invoke('window:showFloater'),
+    moveFloaterBy: (dx: number, dy: number) => ipcRenderer.invoke('window:floaterMoveBy', dx, dy),
     quit: () => ipcRenderer.invoke('window:quit')
   },
   pageId: {

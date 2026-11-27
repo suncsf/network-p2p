@@ -32,6 +32,7 @@ let server: LatticeServer
 let connections: ConnectionManager
 let mainWindow: BrowserWindow | null = null
 let floaterWindow: BrowserWindow | null = null
+const FLOATER_SIZE = 72
 let tray: Tray | null = null
 let isQuitting = false
 
@@ -54,7 +55,7 @@ function getIcon(): Electron.NativeImage {
 function createFloater(): void {
   const state = local.getWindowState('floater') as { x?: number; y?: number } | undefined
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
-  const size = 72
+  const size = FLOATER_SIZE
   floaterWindow = new BrowserWindow({
     width: size,
     height: size,
@@ -361,6 +362,9 @@ function registerIpc(): void {
         sessionId: grant.sessionId,
         resume: JSON.stringify({
           connId: p.connId,
+          host: connections.get(p.connId)?.host,
+          port: connections.get(p.connId)?.port,
+          username: connections.get(p.connId)?.username,
           root: p.root,
           path: p.path,
           dir: localDir,
@@ -416,6 +420,15 @@ function registerIpc(): void {
   })
   ipcMain.handle('window:showFloater', () => {
     if (floaterWindow && !floaterWindow.isDestroyed()) floaterWindow.show()
+  })
+  // 悬浮球手动拖动：按增量移动，并约束在最近显示器工作区内（至少留 12px 可见）
+  ipcMain.handle('window:floaterMoveBy', (_e, dx: number, dy: number) => {
+    if (!floaterWindow || floaterWindow.isDestroyed()) return
+    const [x, y] = floaterWindow.getPosition()
+    const area = screen.getDisplayNearestPoint({ x, y }).workArea
+    const nx = Math.min(Math.max(x + dx, area.x - FLOATER_SIZE + 12), area.x + area.width - 12)
+    const ny = Math.min(Math.max(y + dy, area.y - FLOATER_SIZE + 12), area.y + area.height - 12)
+    floaterWindow.setPosition(Math.round(nx), Math.round(ny))
   })
   ipcMain.handle('window:quit', () => {
     isQuitting = true

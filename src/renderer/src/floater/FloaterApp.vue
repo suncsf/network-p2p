@@ -2,8 +2,9 @@
   <div
     class="floater"
     :class="[stateClass, { alert }]"
-    @click="openMain"
-    @dblclick="openMain"
+    @mousedown="onMouseDown"
+    @mousemove="onMouseMove"
+    @mouseup="onMouseUp"
     @contextmenu.prevent
   >
     <div class="ring" :style="ringStyle"></div>
@@ -34,6 +35,44 @@ const ringStyle = computed(() => {
 function openMain(): void {
   window.api.window.openMain()
   window.api.window.closeFloater()
+}
+
+// 手动拖动：窗口整体 -webkit-app-region: no-drag 时系统拖动不生效，
+// 且 drag 区域会吞掉 click 事件，故用 mousemove + IPC 移动窗口。
+// 拖动距离超过阈值视为拖动，否则 mouseup 时按点击展开主界面。
+const DRAG_THRESHOLD = 4
+let dragging = false
+let moved = false
+let dist = 0
+let lastX = 0
+let lastY = 0
+
+function onMouseDown(e: MouseEvent): void {
+  if (e.button !== 0) return
+  dragging = true
+  moved = false
+  dist = 0
+  lastX = e.screenX
+  lastY = e.screenY
+}
+
+function onMouseMove(e: MouseEvent): void {
+  if (!dragging) return
+  const dx = e.screenX - lastX
+  const dy = e.screenY - lastY
+  lastX = e.screenX
+  lastY = e.screenY
+  if (dx === 0 && dy === 0) return
+  dist += Math.abs(dx) + Math.abs(dy)
+  if (dist <= DRAG_THRESHOLD && !moved) return
+  moved = true
+  window.api.window.moveFloaterBy(Math.round(dx), Math.round(dy))
+}
+
+function onMouseUp(): void {
+  if (!dragging) return
+  dragging = false
+  if (!moved) openMain()
 }
 
 onMounted(() => {
@@ -67,7 +106,7 @@ body,
   overflow: hidden;
   background: transparent;
   user-select: none;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .floater {
@@ -78,7 +117,7 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
+  cursor: grab;
   -webkit-app-region: no-drag;
 }
 
