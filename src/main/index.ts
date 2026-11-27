@@ -247,6 +247,12 @@ function registerIpc(): void {
     local.setSetting('serverConfig', serverConfig)
     return serverConfig
   })
+  // 服务端随应用自动启动（重启后免手动去服务端页点启动，避免重启后对端连不上）
+  ipcMain.handle('server:getAutoStart', () => local.getSetting<boolean>('serverAutoStart', false))
+  ipcMain.handle('server:setAutoStart', (_e, v: boolean) => {
+    local.setSetting('serverAutoStart', v === true)
+    return v === true
+  })
   ipcMain.handle('server:getStatus', () => ({
     running: server.isRunning(),
     config: serverConfig,

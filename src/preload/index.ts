@@ -8,6 +8,9 @@ const api = {
     start: () => ipcRenderer.invoke('server:start'),
     stop: () => ipcRenderer.invoke('server:stop'),
     freePort: () => ipcRenderer.invoke('server:freePort'),
+
+    getAutoStart: () => ipcRenderer.invoke('server:getAutoStart'),
+    setAutoStart: (v: boolean) => ipcRenderer.invoke('server:setAutoStart', v),
     /** 服务端当前登录的连接列表 */
     listSessions: () => ipcRenderer.invoke('server:listSessions')
   },

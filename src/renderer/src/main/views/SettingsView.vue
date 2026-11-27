@@ -23,6 +23,10 @@
         <el-form-item label="锁定时长(分钟)">
           <el-input-number v-model="lockMinutes" :min="1" :max="1440" />
         </el-form-item>
+        <el-form-item label="服务端自启动">
+          <el-switch v-model="autoStart" @change="saveAutoStart" />
+          <span class="hint">开启后应用启动即自动运行服务端，重启/更新后对端仍能连上本机</span>
+        </el-form-item>
         <el-form-item label=" ">
           <el-button type="primary" @click="save">保存</el-button>
           <el-button @click="freePort">自动选空闲端口</el-button>
@@ -34,7 +38,7 @@
       <ul>
         <li>端口修改后需重启服务端生效；端口被占用时可一键自动选择空闲端口。</li>
         <li>下载策略保存后立即对运行中的服务端生效（端口除外）。</li>
-        <li>服务端的启动/停止请在「服务端」页操作。</li>
+        <li>服务端的启动/停止请在「服务端」页操作；建议开启「服务端自启动」，重启应用后免手动启动。</li>
         <li>关闭窗口不会退出程序，程序会隐藏在右下角托盘图标中。</li>
         <li>悬浮球可拖动到任意位置，点击展开主界面。</li>
       </ul>
@@ -43,7 +47,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
 const config = reactive({
@@ -80,7 +84,17 @@ async function freePort(): Promise<void> {
   ElMessage.success('已切换为空闲端口')
 }
 
-onMounted(load)
+const autoStart = ref(false)
+
+async function saveAutoStart(v: boolean | string | number): Promise<void> {
+  await window.api.server.setAutoStart(v === true)
+  ElMessage.success(v === true ? '已开启：应用启动即运行服务端' : '已关闭')
+}
+
+onMounted(async () => {
+  load()
+  autoStart.value = (await window.api.server.getAutoStart()) === true
+})
 </script>
 
 <style scoped>
@@ -89,6 +103,11 @@ onMounted(load)
 }
 .note {
   margin-top: 16px;
+}
+.hint {
+  margin-left: 12px;
+  color: #909399;
+  font-size: 12px;
 }
 .note ul {
   margin: 0;
