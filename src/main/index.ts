@@ -4,7 +4,7 @@ import { existsSync, statSync } from 'fs'
 import { openDatabase, type Db } from './server/db'
 import { LocalStore } from './store'
 import { TransferStore } from './transfers'
-import { TransferRunner, type StartUploadBatchParams, type StartUploadParams } from './transfer-runner'
+import { TransferRunner, applyRemoteTransferProgress, type StartUploadBatchParams, type StartUploadParams } from './transfer-runner'
 import { LatticeServer, type ServerConfig } from './server/service'
 import { LatticeClient, type ConnectionState } from './client/client'
 import { ConnectionManager } from './client/manager'
@@ -571,18 +571,12 @@ function setupClient(): void {
         n.show()
         safeSend(floaterWindow, 'floater:alert')
       } else if (ev.event === 'transfer:progress') {
-        // 对端上传方取消/失败时，把本机对应的下载记录从「进行中」落到终态，避免永久卡住
-        const d = ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string }
-        if (d.sessionId && (d.cancelled || d.failed)) {
-          for (const r of transfers.getBySession(d.sessionId)) {
-            if (r.kind === 'p2p-recv' && r.state === 'active') {
-              transfers.update(r.id, {
-                state: d.cancelled ? 'cancelled' : 'interrupted',
-                error: d.reason ?? (d.cancelled ? '对端已取消' : '对端传输失败')
-              })
-            }
-          }
-        }
+        // 对端传输事件同步：取消/失败落到终态，暂停/恢复同步本机下载记录状态
+        applyRemoteTransferProgress(
+          transfers,
+          runner,
+          ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string; paused?: boolean }
+        )
       }
     }
   )

@@ -430,6 +430,18 @@ export class TransferRunner {
     throw new Error('下载方向的传输由对端控制，暂不支持暂停')
   }
 
+  /** 对端暂停/恢复同步：更新本机对应下载（p2p-recv）记录的暂停状态 */
+  applyPeerPause(sessionId: string, paused: boolean): void {
+    for (const r of this.store.getBySession(sessionId)) {
+      if (r.kind !== 'p2p-recv') continue
+      if (paused && r.state === 'active') {
+        this.store.update(r.id, { state: 'paused', error: '对方已暂停' })
+      } else if (!paused && r.state === 'paused') {
+        this.store.update(r.id, { state: 'active', error: null })
+      }
+    }
+  }
+
   /** 取消一条传输记录（进行中 / 已暂停的可取消） */
   async cancel(id: number): Promise<void> {
     const rec = this.store.get(id)
@@ -570,4 +582,30 @@ export class TransferRunner {
       throw e
     }
   }
+}
+
+/**
+ * 对端服务端广播的 transfer:progress 事件 → 本机传输记录同步：
+ * - cancelled/failed：把本机对应下载记录落到终态，避免永久卡在「进行中」
+ * - paused：对端暂停/恢复上传，同步本机下载记录的暂停状态（两端暂停动作一致）
+ * index.ts 客户端事件回调与双端测试共用此函数，保证生产行为与测试一致
+ */
+export function applyRemoteTransferProgress(
+  store: TransferStore,
+  runner: TransferRunner,
+  d: { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string; paused?: boolean }
+): void {
+  if (!d.sessionId) return
+  if (d.cancelled || d.failed) {
+    for (const r of store.getBySession(d.sessionId)) {
+      if (r.kind === 'p2p-recv' && r.state === 'active') {
+        store.update(r.id, {
+          state: d.cancelled ? 'cancelled' : 'interrupted',
+          error: d.reason ?? (d.cancelled ? '对端已取消' : '对端传输失败')
+        })
+      }
+    }
+    return
+  }
+  if (typeof d.paused === 'boolean') runner.applyPeerPause(d.sessionId, d.paused)
 }

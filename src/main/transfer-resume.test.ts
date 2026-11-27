@@ -7,7 +7,7 @@ import { LocalStore } from './store'
 import { LatticeServer } from './server/service'
 import { ConnectionManager } from './client/manager'
 import { TransferStore } from './transfers'
-import { TransferRunner } from './transfer-runner'
+import { TransferRunner, applyRemoteTransferProgress } from './transfer-runner'
 import { maskFromNames } from '@shared/permissions'
 import type { TransferRecord } from '@shared/protocol'
 
@@ -100,7 +100,16 @@ beforeAll(async () => {
   }, storeB)
   await serverB.start()
 
-  conns = new ConnectionManager(() => {}, () => {})
+  // 与生产 index.ts 一致：把远端服务端广播的 transfer:progress 同步到本机记录
+  conns = new ConnectionManager(() => {}, (_connId, ev) => {
+    if (ev.event === 'transfer:progress') {
+      applyRemoteTransferProgress(
+        storeB,
+        runnerB,
+        ev.data as { sessionId?: string; cancelled?: boolean; failed?: boolean; reason?: string; paused?: boolean }
+      )
+    }
+  })
   const info = await conns.connect({ host: '127.0.0.1', port: A_WS, username: 'alice', password: 'pw123456' })
   connId = info.id
 
@@ -326,6 +335,11 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     await runnerB.pause(rec.id)
     const paused = await waitState(storeB, rec.id, ['paused'])
     expect(paused.state).toBe('paused')
+    // 暂停同步：发送端的上传记录也进入「已暂停」（p2pPushPause 同步对端记录）
+    const sendRec = storeA.getBySession(grant.sessionId).find((r) => r.kind === 'p2p-send')
+    expect(sendRec).toBeDefined()
+    const sendPaused = await waitState(storeA, sendRec!.id, ['paused', 'completed'])
+    expect(sendPaused.state).toBe('paused')
     // 暂停后落盘停止增长（发送端挂起，socket 保留）；先等 TCP 在途分块落盘稳定，部分数据在 .tmp
     let frozen = 0
     for (let i = 0; i < 200; i++) {
@@ -341,6 +355,9 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     const done = await waitState(storeB, rec.id, ['completed', 'interrupted', 'cancelled'])
     expect(done.state).toBe('completed')
     await waitFinal(dest, big.length)
+    // 恢复同步：发送端记录回到进行中并最终完成
+    const sendDone = await waitState(storeA, sendRec!.id, ['completed', 'interrupted', 'cancelled'])
+    expect(sendDone.state).toBe('completed')
   })
 
   it('S9: 上传暂停后继续（挂起分块循环，上传会话保留免重初始化）', async () => {
@@ -370,5 +387,45 @@ describe('断点续传回归（TransferRunner 真实流程）', () => {
     const done = await waitState(storeB, rec.id, ['completed', 'interrupted'])
     expect(done.state).toBe('completed')
     expect(statSync(remote).size).toBe(big.length)
+  })
+
+  it('S10: 发送端暂停后接收端记录同步暂停，恢复后同步回进行中', async () => {
+    const big = Buffer.alloc(48 * 1024 * 1024, 9)
+    writeFileSync(path.join(sharedA, 'pause-sync.bin'), big)
+    const grant = serverB.createLocalTransferGrant(recvDir)
+    const dest = path.join(recvDir, 'pause-sync.bin')
+    const rec = storeB.create({
+      kind: 'p2p-recv',
+      peer: 'alice',
+      name: 'pause-sync.bin',
+      remotePath: 'pause-sync.bin',
+      localPath: dest,
+      total: big.length,
+      state: 'active',
+      sessionId: grant.sessionId,
+      resume: JSON.stringify({
+        connId, host: '127.0.0.1', port: A_WS, username: 'alice',
+        root: sharedA, path: 'pause-sync.bin', dir: recvDir,
+        rename: 'pause-sync.bin', isDir: false, name: 'pause-sync.bin'
+      })
+    })
+    await conns.request(connId, 'p2pPush', {
+      root: sharedA, path: 'pause-sync.bin',
+      host: grant.host, port: grant.port, p2pToken: grant.p2pToken, sessionId: grant.sessionId,
+      rename: 'pause-sync.bin'
+    })
+    const sendRec = storeA.getBySession(grant.sessionId).find((r) => r.kind === 'p2p-send')
+    expect(sendRec).toBeDefined()
+    await waitSize(dest + '.tmp', (n) => n > 1024 * 1024)
+    // 发送端暂停 → 本机记录暂停 + 广播 → 接收端记录经广播同步为「已暂停」
+    await runnerA!.pause(sendRec!.id)
+    expect((await waitState(storeA, sendRec!.id, ['paused'])).state).toBe('paused')
+    expect((await waitState(storeB, rec.id, ['paused'])).state).toBe('paused')
+    // 发送端恢复 → 接收端记录同步回「进行中」，直至完成
+    await runnerA!.resume(sendRec!.id)
+    await waitState(storeB, rec.id, ['active', 'completed'])
+    const done = await waitState(storeB, rec.id, ['completed', 'interrupted', 'cancelled'])
+    expect(done.state).toBe('completed')
+    await waitFinal(dest, big.length)
   })
 })

@@ -926,19 +926,35 @@ export class LatticeServer {
     }
   }
 
-  /** 暂停上传任务（挂起上传，socket 保留）；返回是否存在活跃任务 */
+  /** 同步本机上传（p2p-send）记录的暂停状态：任意一端暂停/恢复，两端记录状态一致 */
+  private setSendPaused(sessionId: string, paused: boolean): void {
+    for (const r of this.store?.getBySession(sessionId) ?? []) {
+      if (r.kind !== 'p2p-send') continue
+      if (paused && r.state === 'active') {
+        this.store?.update(r.id, { state: 'paused', error: '已暂停' })
+      } else if (!paused && r.state === 'paused') {
+        this.store?.update(r.id, { state: 'active', error: null })
+      }
+    }
+  }
+
+  /** 暂停上传任务（挂起上传，socket 保留）；同步本机记录并广播给对端；返回是否存在活跃任务 */
   pausePush(sessionId: string): boolean {
     const job = this.pushJobs.get(sessionId)
     if (!job) return false
     job.paused = true
+    this.setSendPaused(sessionId, true)
+    this.broadcast({ event: 'transfer:progress', data: { sessionId, paused: true } })
     return true
   }
 
-  /** 恢复已暂停的上传任务（原地继续）；返回是否存在已暂停任务 */
+  /** 恢复已暂停的上传任务（原地继续）；同步本机记录并广播给对端；返回是否存在已暂停任务 */
   resumePausedPush(sessionId: string): boolean {
     const job = this.pushJobs.get(sessionId)
     if (!job || !job.paused) return false
     job.paused = false
+    this.setSendPaused(sessionId, false)
+    this.broadcast({ event: 'transfer:progress', data: { sessionId, paused: false } })
     return true
   }
 
@@ -962,6 +978,10 @@ export class LatticeServer {
   }): Promise<void> {
     const fileOps = new FileOps(this.systemChecker(r.root))
     const prepared = await this.preparePush({ ...r }, fileOps)
+    // 完整重放前同步恢复状态：本机遗留的「已暂停」记录回到进行中，
+    // 并广播告知对端（如发送端重启后原任务已不在，对端暂停记录不能再等原地唤醒）
+    this.setSendPaused(r.sessionId, false)
+    this.broadcast({ event: 'transfer:progress', data: { sessionId: r.sessionId, paused: false } })
     await this.executePush(
       {
         root: r.root,
