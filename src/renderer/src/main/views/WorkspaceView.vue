@@ -68,6 +68,15 @@
           <el-alert :title="error" type="error" show-icon :closable="false" />
         </el-form-item>
       </el-form>
+      <el-divider content-position="left">最近连接</el-divider>
+      <el-empty v-if="history.length === 0" description="暂无历史" :image-size="60" />
+      <div v-for="h in history" :key="h.id" class="history-item">
+        <div class="h-main" @click="fillHistory(h)">
+          <span class="h-host">{{ h.host }}:{{ h.port }}</span>
+          <span class="h-user">{{ h.username }}</span>
+        </div>
+        <el-button text type="primary" size="small" @click="quickConnect(h)">连接</el-button>
+      </div>
       <template #footer>
         <el-button @click="showNew = false">取消</el-button>
         <el-button type="primary" :loading="loading" @click="submit">连接</el-button>
@@ -95,6 +104,7 @@ const newConnPageId = ref('')
 watch(showNew, (visible) => {
   if (visible) {
     newConnPageId.value = registerDialog('新建连接', 'workspace::new-connection')
+    void loadHistory()
   } else if (newConnPageId.value) {
     unregisterDialog(newConnPageId.value)
     newConnPageId.value = ''
@@ -104,6 +114,26 @@ const loading = ref(false)
 const error = ref('')
 const form = reactive({ host: '127.0.0.1', port: 47100, username: '', password: '' })
 let unsubs: Array<() => void> = []
+const history = ref<Array<{ id: number; host: string; port: number; username: string; hasPassword: boolean }>>([])
+
+async function loadHistory(): Promise<void> {
+  history.value = (await window.api.history.list()) as typeof history.value
+}
+
+/** 点击历史记录：填入参数并带出记住的密码 */
+async function fillHistory(h: { id: number; host: string; port: number; username: string; hasPassword: boolean }): Promise<void> {
+  form.host = h.host
+  form.port = h.port
+  form.username = h.username
+  form.password = h.hasPassword ? await window.api.history.getPassword(h.id) : ''
+  error.value = ''
+}
+
+/** 一键直连历史记录 */
+async function quickConnect(h: { id: number; host: string; port: number; username: string; hasPassword: boolean }): Promise<void> {
+  await fillHistory(h)
+  await submit()
+}
 
 function label(c: ConnectionInfo): string {
   return `${c.username || c.host}@${c.host}:${c.port}`
@@ -217,6 +247,31 @@ defineExpose({ openNew: () => (showNew.value = true) })
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.history-item:last-of-type {
+  border-bottom: none;
+}
+.h-main {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.h-host {
+  font-weight: 600;
+  font-size: 13px;
+}
+.h-user {
+  font-size: 12px;
+  color: #909399;
 }
 .tab-dot {
   width: 8px;

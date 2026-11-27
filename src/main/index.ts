@@ -262,39 +262,43 @@ function registerIpc(): void {
   // 客户端（多连接）
   ipcMain.handle(
     'client:connect',
-    async (_e, opts: { host: string; port: number; username: string; password: string; rememberPassword?: boolean }) => {
+    async (_e, opts: { host: string; port: number; username: string; password: string }) => {
       const info = await connections.connect(opts)
-      // 记住连接参数：密码用 safeStorage 加密后落库（Windows DPAPI / Linux libsecret）
-      let passwordEnc: string | null | undefined
-      if (opts.rememberPassword && opts.password && safeStorage.isEncryptionAvailable()) {
-        passwordEnc = safeStorage.encryptString(opts.password).toString('base64')
-      } else if (opts.rememberPassword === false) {
-        passwordEnc = null // 显式取消记住 → 清除旧密码
-      }
+      // 默认全部存储：密码用 safeStorage 加密落库（Windows DPAPI / Linux libsecret）
+      const passwordEnc =
+        opts.password && safeStorage.isEncryptionAvailable()
+          ? safeStorage.encryptString(opts.password).toString('base64')
+          : null
       local.saveConnection(opts.host, opts.port, opts.username, passwordEnc)
       saveOpenConnections()
       sendToAll('state:connections', connections.list())
       return info
     }
   )
-  // 重新打开历史连接（工作区「重新连接」按钮）：用记住的密码直接重连
-  ipcMain.handle('client:reconnect', async (_e, id: string) => {
-    const info = connections.get(id)
+  // 重新打开历史连接（工作区「重新连接」按钮）：优先用记住的密码，未记住时由渲染层弹窗补输
+  ipcMain.handle('client:reconnect', async (_e, p: { id: string; password?: string }) => {
+    const info = connections.get(p.id)
     if (!info) throw new Error('连接不存在')
-    if (connections.list().find((c) => c.id === id)?.state === 'connected') {
-      return info
-    }
-    const pw = rememberedPassword(info.host, info.port, info.username)
-    if (!pw) {
-      throw new Error('未记住密码，请在「新建连接」中连接一次并勾选「记住密码」')
-    }
+    const cur = connections.list().find((c) => c.id === p.id)
+    if (cur?.state === 'connected') return info
+    const pw = p.password || rememberedPassword(info.host, info.port, info.username)
+    if (!pw) throw new Error('未记住密码')
     const r = await connections.connect({
       host: info.host,
       port: info.port,
       username: info.username,
       password: pw,
-      id
+      id: p.id
     })
+    // 重连时输入的密码同样默认记住，下次免输入
+    if (p.password && safeStorage.isEncryptionAvailable()) {
+      local.saveConnection(
+        info.host,
+        info.port,
+        info.username,
+        safeStorage.encryptString(p.password).toString('base64')
+      )
+    }
     saveOpenConnections()
     sendToAll('state:connections', connections.list())
     return r

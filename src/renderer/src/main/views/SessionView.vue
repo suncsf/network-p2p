@@ -37,7 +37,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ConnectionInfo, FileRootGrant } from '@shared/protocol'
 import FilesView from './FilesView.vue'
 import TransfersView from './TransfersView.vue'
@@ -48,12 +48,26 @@ const reconnecting = ref(false)
 
 const grants = computed<FileRootGrant[]>(() => props.connection.login?.grants ?? [])
 
-async function reconnect(): Promise<void> {
+async function reconnect(pw?: string): Promise<void> {
   reconnecting.value = true
   try {
-    await window.api.client.reconnect(props.connection.id)
+    await window.api.client.reconnect(props.connection.id, pw)
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    const msg = (e as Error).message
+    if (msg.includes('未记住密码')) {
+      try {
+        const r = await ElMessageBox.prompt('该连接没有记住密码，输入一次即可重连（将自动记住）', '重新连接', {
+          inputType: 'password',
+          inputPlaceholder: '密码',
+          inputValidator: (v: string) => !!v || '请输入密码'
+        })
+        await reconnect(r.value)
+      } catch {
+        /* 用户取消输入 */
+      }
+    } else {
+      ElMessage.error(msg)
+    }
   } finally {
     reconnecting.value = false
   }

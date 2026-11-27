@@ -20,9 +20,6 @@
         <el-form-item label="密码">
           <el-input v-model="form.password" type="password" show-password placeholder="密码" />
         </el-form-item>
-        <el-form-item label=" ">
-          <el-checkbox v-model="form.rememberPassword">记住密码</el-checkbox>
-        </el-form-item>
         <el-form-item v-if="error" label=" ">
           <el-alert :title="error" type="error" show-icon :closable="false" />
         </el-form-item>
@@ -52,7 +49,7 @@ import type { FileRootGrant, LoginResult } from '@shared/protocol'
 
 const emit = defineEmits<{ connected: [grants: FileRootGrant[]] }>()
 
-const form = reactive({ host: '127.0.0.1', port: 47100, username: '', password: '', rememberPassword: true })
+const form = reactive({ host: '127.0.0.1', port: 47100, username: '', password: '' })
 const loading = ref(false)
 const error = ref('')
 const history = ref<Array<{ id: number; host: string; port: number; username: string; hasPassword: boolean }>>([])

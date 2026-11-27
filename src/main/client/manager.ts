@@ -108,7 +108,10 @@ export class ConnectionManager {
 
   async disconnect(id: string): Promise<boolean> {
     const c = this.clients.get(id)
-    if (!c) return false
+    if (!c) {
+      // 未建立 socket 的恢复连接：仅移除 info，否则选项卡无法关闭
+      return this.infos.delete(id)
+    }
     await c.disconnect()
     this.clients.delete(id)
     this.infos.delete(id)
