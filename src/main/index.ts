@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { openDatabase, type Db } from './server/db'
 import { LocalStore } from './store'
 import { TransferStore } from './transfers'
-import { TransferRunner, type StartUploadParams } from './transfer-runner'
+import { TransferRunner, type StartUploadBatchParams, type StartUploadParams } from './transfer-runner'
 import { LatticeServer, type ServerConfig } from './server/service'
 import { LatticeClient, type ConnectionState } from './client/client'
 import { ConnectionManager } from './client/manager'
@@ -407,6 +407,16 @@ function registerIpc(): void {
     return true
   })
   ipcMain.handle('transfer:startUpload', (_e, p: StartUploadParams) => runner.startUpload(p))
+  // 批量上传：多选文件/文件夹（主进程展开目录并保留结构，逐个排队上传）
+  ipcMain.handle('transfer:startUploadBatch', (_e, p: StartUploadBatchParams) => runner.startUploadBatch(p))
+  // 上传源选择：Windows 原生对话框无法同时选文件与目录，按 mode 分开（均可多选）
+  ipcMain.handle('dialog:pickUpload', async (_e, mode: 'file' | 'dir') => {
+    const r = await dialog.showOpenDialog({
+      title: mode === 'dir' ? '选择要上传的文件夹（可多选）' : '选择要上传的文件（可多选）',
+      properties: mode === 'dir' ? ['openDirectory', 'multiSelections'] : ['openFile', 'multiSelections']
+    })
+    return r.canceled ? [] : r.filePaths
+  })
 
   // 连接历史
   ipcMain.handle('history:list', () => local.listConnections())

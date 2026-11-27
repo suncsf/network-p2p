@@ -664,7 +664,9 @@ export class LatticeServer {
   private async preparePush(
     p: {
       root: string
-      path: string
+      path?: string
+      /** 批量多选：多个远端路径一次会话推流（各项顶层名称需唯一，同目录选择天然满足） */
+      paths?: string[]
       host: string
       port: number
       sessionId: string
@@ -672,12 +674,16 @@ export class LatticeServer {
       peer?: string
     },
     ops?: FileOps
-  ): Promise<{ recId?: number; fileCount: number; total: number }> {
+  ): Promise<{
+    recId?: number
+    fileCount: number
+    total: number
+    items: Array<{ absPath: string; relPath: string }>
+    relPaths: string[]
+  }> {
     const fileOps = ops ?? new FileOps(this.systemChecker(p.root))
-    const items = await fileOps.collectForTransfer(p.root, p.path)
-    if (items.length === 0) {
-      throw Object.assign(new Error('没有可发送的文件'), { code: 'BAD_REQUEST' as const })
-    }
+    const targets = p.paths?.length ? p.paths : [p.path!]
+    const items = await this.collectTargets(fileOps, p.root, targets)
     let relPaths: string[] = items.map((f) => f.relPath)
     if (p.rename) {
       if (items.length !== 1 || /[\\/]/.test(p.rename) || p.rename === '.' || p.rename === '..') {
@@ -708,8 +714,8 @@ export class LatticeServer {
       const rec = this.store.create({
         kind: 'p2p-send',
         peer: p.peer ?? `${p.host}:${p.port}`,
-        name: p.rename ? p.rename : basename(p.path) || '传输',
-        remotePath: p.path,
+        name: p.rename ? p.rename : targets.length > 1 ? `${targets.length} 个项目` : basename(targets[0]) || '传输',
+        remotePath: targets.length > 1 ? `${targets[0]} 等 ${targets.length} 项` : targets[0],
         localPath: '',
         total,
         state: 'active',
@@ -717,6 +723,7 @@ export class LatticeServer {
         resume: JSON.stringify({
           root: p.root,
           path: p.path,
+          paths: targets.length > 1 ? targets : undefined,
           host: p.host,
           port: p.port,
           sessionId: p.sessionId,
@@ -726,7 +733,28 @@ export class LatticeServer {
       })
       recId = rec.id
     }
-    return { recId, fileCount: items.length, total }
+    return { recId, fileCount: items.length, total, items, relPaths }
+  }
+
+  /** 收集多个远端路径的待发送文件（目录递归展开），按 relPath 去重并要求非空 */
+  private async collectTargets(
+    fileOps: FileOps,
+    root: string,
+    targets: string[]
+  ): Promise<Array<{ absPath: string; relPath: string }>> {
+    const out: Array<{ absPath: string; relPath: string }> = []
+    const seen = new Set<string>()
+    for (const t of targets) {
+      for (const f of await fileOps.collectForTransfer(root, t)) {
+        if (seen.has(f.relPath)) continue
+        seen.add(f.relPath)
+        out.push(f)
+      }
+    }
+    if (out.length === 0) {
+      throw Object.assign(new Error('没有可发送的文件'), { code: 'BAD_REQUEST' as const })
+    }
+    return out
   }
 
   /** P2P 推送执行阶段：建立任务注册表并发送（数据不经 WS 命令通道） */
@@ -818,7 +846,8 @@ export class LatticeServer {
   /** 续传发送端推送（记录里的 resume 上下文） */
   async resumePush(r: {
     root: string
-    path: string
+    path?: string
+    paths?: string[]
     host: string
     port: number
     sessionId: string
@@ -827,13 +856,10 @@ export class LatticeServer {
   }): Promise<void> {
     const fileOps = new FileOps(this.systemChecker(r.root))
     const prepared = await this.preparePush({ ...r }, fileOps)
-    const items = await fileOps.collectForTransfer(r.root, r.path)
-    let relPaths: string[] = items.map((f) => f.relPath)
-    if (r.rename) relPaths = [r.rename]
     await this.executePush(
       {
         root: r.root,
-        path: r.path,
+        path: r.path ?? r.paths?.[0] ?? '',
         host: r.host,
         port: r.port,
         sessionId: r.sessionId,
@@ -842,7 +868,11 @@ export class LatticeServer {
         resume: true,
         username: 'resume'
       },
-      { recId: prepared.recId, items: items.map((f, i) => ({ absPath: f.absPath, relPath: relPaths[i] })), total: prepared.total }
+      {
+        recId: prepared.recId,
+        items: prepared.items.map((f, i) => ({ absPath: f.absPath, relPath: prepared.relPaths[i] })),
+        total: prepared.total
+      }
     )
   }
 
@@ -855,7 +885,9 @@ export class LatticeServer {
   ): Promise<void> {
     const p = req.params as {
       root: string
-      path: string
+      path?: string
+      /** 批量多选：多个远端路径一次会话推流 */
+      paths?: string[]
       host: string
       port: number
       p2pToken: string
@@ -864,19 +896,17 @@ export class LatticeServer {
       resume?: boolean
     }
     const prepared = await this.preparePush(
-      { root: p.root, path: p.path, host: p.host, port: Number(p.port), sessionId: p.sessionId, rename: p.rename },
+      { root: p.root, path: p.path, paths: p.paths, host: p.host, port: Number(p.port), sessionId: p.sessionId, rename: p.rename },
       ops
     )
     this.reply(socket, req.id, true, { fileCount: prepared.fileCount })
+    const firstName = p.paths?.length ? p.paths[0] : (p.path ?? '')
     this.audit.log(s.username, 'p2p:push', {
       root: p.root,
-      path: p.path,
+      path: firstName,
       files: prepared.fileCount,
       to: `${p.host}:${p.port}`
     })
-    const items = await ops.collectForTransfer(p.root, p.path)
-    let relPaths: string[] = items.map((f) => f.relPath)
-    if (p.rename) relPaths = [p.rename]
     // 异步执行：下载由对端发起，需本机服务端确认后才推送（接收端是发起方本机，已免确认）
     void (async () => {
       // 断点续传：同会话已有发送记录 → 沿用既有授权，免二次确认
@@ -885,7 +915,7 @@ export class LatticeServer {
         const ok = await this.transfers.request({
           sessionId: p.sessionId,
           from: s.username,
-          fileName: p.rename ?? basename(p.path),
+          fileName: p.rename ?? basename(firstName),
           fileCount: prepared.fileCount,
           totalSize: prepared.total
         })
@@ -897,14 +927,14 @@ export class LatticeServer {
             event: 'transfer:progress',
             data: { sessionId: p.sessionId, cancelled: true, reason: '对方拒绝或确认超时' }
           })
-          this.audit.log(s.username, 'p2p:push:fail', { root: p.root, path: p.path, error: '已拒绝或确认超时' })
+          this.audit.log(s.username, 'p2p:push:fail', { root: p.root, path: firstName, error: '已拒绝或确认超时' })
           return
         }
       }
       await this.executePush(
         {
           root: p.root,
-          path: p.path,
+          path: firstName,
           host: p.host,
           port: Number(p.port),
           sessionId: p.sessionId,
@@ -915,7 +945,7 @@ export class LatticeServer {
         },
         {
           recId: prepared.recId,
-          items: items.map((f, i) => ({ absPath: f.absPath, relPath: relPaths[i] })),
+          items: prepared.items.map((f, i) => ({ absPath: f.absPath, relPath: prepared.relPaths[i] })),
           total: prepared.total
         }
       )

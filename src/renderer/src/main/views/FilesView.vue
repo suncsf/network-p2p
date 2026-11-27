@@ -22,7 +22,24 @@
           </el-radio-button>
         </el-radio-group>
         <el-button :icon="Refresh" circle @click="load" />
-        <el-button :icon="Upload" :disabled="!perm('UPLOAD')" @click="pickUpload">上传</el-button>
+        <el-dropdown
+          split-button
+          :disabled="!perm('UPLOAD')"
+          class="upload-dd"
+          @click="pickUpload('file')"
+          @command="(m: string) => void pickUpload(m as 'file' | 'dir')"
+        >
+          上传
+          <template #dropdown>
+            <el-dropdown-item command="file">上传文件（可多选）</el-dropdown-item>
+            <el-dropdown-item command="dir">上传文件夹（可多选）</el-dropdown-item>
+          </template>
+        </el-dropdown>
+        <el-button
+          :icon="Download"
+          :disabled="selected.length === 0 || !perm('TRANSFER')"
+          @click="downloadSelected"
+        >下载选中{{ selected.length ? `(${selected.length})` : '' }}</el-button>
         <el-button :icon="FolderAdd" :disabled="!perm('WRITE')" @click="promptMkdir">新建文件夹</el-button>
       </div>
     </div>
@@ -33,10 +50,12 @@
       v-loading="loading"
       :data="entries"
       height="calc(100vh - 170px)"
+      @selection-change="onSelectionChange"
       @row-dblclick="onOpen"
       @row-contextmenu="onRowContextmenu"
       @contextmenu.prevent="openBlankMenu"
     >
+      <el-table-column type="selection" width="42" />
       <el-table-column label="名称" min-width="280">
         <template #default="{ row }">
           <span class="name" @click="onOpen(row)">
@@ -87,6 +106,12 @@
         @click="onOpen(row)"
         @contextmenu.prevent.stop="openMenu($event, row)"
       >
+        <el-checkbox
+          class="card-check"
+          :model-value="isSelected(row)"
+          @click.stop
+          @change="toggleSelect(row)"
+        />
         <el-icon class="card-icon" :size="40" :color="row.type === 'dir' ? '#e6a23c' : '#909399'">
           <Folder v-if="row.type === 'dir'" />
           <Document v-else />
@@ -223,7 +248,8 @@ function rowItems(row: FileEntry): ContextMenuItem[] {
 
 function blankItems(): ContextMenuItem[] {
   return [
-    { label: '上传文件', icon: Upload, disabled: !perm('UPLOAD'), action: () => pickUpload() },
+    { label: '上传文件', icon: Upload, disabled: !perm('UPLOAD'), action: () => void pickUpload('file') },
+    { label: '上传文件夹', icon: FolderAdd, disabled: !perm('UPLOAD'), action: () => void pickUpload('dir') },
     { label: '新建文件夹', icon: FolderAdd, disabled: !perm('WRITE'), action: () => void promptMkdir() },
     { divider: true },
     { label: '刷新', icon: Refresh, action: () => void load() }
@@ -249,6 +275,7 @@ async function load(): Promise<void> {
       path: currentPath.value
     })) as { entries: FileEntry[] }
     entries.value = r.entries
+    selected.value = [] // 目录内容已变，清除勾选
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -331,31 +358,79 @@ async function download(row: FileEntry): Promise<void> {
   }
 }
 
-async function pickUpload(): Promise<void> {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.onchange = async () => {
-    const file = input.files?.[0]
-    if (!file) return
-    try {
-      // Electron 45 移除了 file.path，用 webUtils 获取本地绝对路径
-      const filePath = window.api.p2p.getPathForFile(file)
-      if (!filePath) throw new Error('无法获取本地文件路径')
-      // 上传由主进程执行（4MB 分块），支持取消与断点续传，进度见传输面板
-      await window.api.transfers.startUpload({
-        connId: props.connectionId,
-        root: currentRoot.value,
-        path: joinPath(currentPath.value, file.name),
-        filePath,
-        name: file.name,
-        size: file.size
-      })
-      ElMessage.info('上传已开始，可在「传输」面板查看进度或取消')
-    } catch (e) {
-      ElMessage.error((e as Error).message)
-    }
+async function pickUpload(mode: 'file' | 'dir'): Promise<void> {
+  if (!perm('UPLOAD')) return
+  try {
+    // 主进程原生对话框：文件/目录均支持多选（Windows 无法混选，分两个入口）
+    const sources = (await window.api.dialog.pickUpload(mode)) as string[]
+    if (!sources || sources.length === 0) return
+    // 上传由主进程执行：展开目录并保留结构，每个文件一条记录按顺序上传，
+    // 支持取消与断点续传，进度见传输面板
+    const r = (await window.api.transfers.startUploadBatch({
+      connId: props.connectionId,
+      root: currentRoot.value,
+      baseDir: currentPath.value,
+      sources
+    })) as { count: number }
+    ElMessage.info(`已开始上传 ${r.count} 个文件，可在「传输」面板查看进度或取消`)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
   }
-  input.click()
+}
+
+/* ---------- 多选与批量下载 ---------- */
+const selected = ref<FileEntry[]>([])
+
+function onSelectionChange(rows: FileEntry[]): void {
+  selected.value = rows
+}
+
+function isSelected(row: FileEntry): boolean {
+  return selected.value.some((s) => s.path === row.path)
+}
+
+/** 卡片视图的复选框（列表视图由 el-table 自身管理勾选） */
+function toggleSelect(row: FileEntry): void {
+  selected.value = isSelected(row)
+    ? selected.value.filter((s) => s.path !== row.path)
+    : [...selected.value, row]
+}
+
+/** 批量下载：选中项一次 P2P 会话推流（对方只需确认一次），保留各项顶层名称 */
+async function downloadSelected(): Promise<void> {
+  const items = [...selected.value]
+  if (items.length === 0) return
+  try {
+    const totalSize = items.reduce((s, r) => s + (r.type === 'file' ? r.size : 0), 0)
+    const name = items.length === 1 ? items[0].name : `${items.length} 个项目`
+    const prep = (await window.api.p2p.prepareReceive({
+      connId: props.connectionId,
+      root: currentRoot.value,
+      path: items[0].path,
+      name,
+      size: totalSize,
+      isDir: true
+    })) as P2pPrep
+    ElMessage.info('已发起下载，等待对方（服务端）确认后开始')
+    try {
+      await window.api.client.request(props.connectionId, 'p2pPush', {
+        root: currentRoot.value,
+        paths: items.map((i) => i.path),
+        host: prep.host,
+        port: prep.port,
+        p2pToken: prep.p2pToken,
+        sessionId: prep.sessionId
+      })
+      ElMessage.info(`已发起下载（${items.length} 个项目），对方确认后开始`)
+    } catch (e) {
+      // 推送发起失败：把接收记录标记为已取消，避免面板残留「进行中」
+      await window.api.transfers.fail(prep.sessionId, (e as Error).message).catch(() => {})
+      throw e
+    }
+  } catch (e) {
+    const msg = (e as Error).message
+    if (msg !== 'CANCELLED') ElMessage.error(`批量下载失败：${msg}`)
+  }
 }
 
 interface P2pPrep {
@@ -439,6 +514,15 @@ onUnmounted(() => {
 }
 .actions {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.upload-dd {
+  margin: 0;
+}
+.upload-dd .el-button {
+  margin-left: 0 !important;
 }
 .name {
   display: inline-flex;
@@ -470,6 +554,7 @@ onUnmounted(() => {
   grid-column: 1 / -1;
 }
 .card {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -479,6 +564,11 @@ onUnmounted(() => {
   border-radius: 8px;
   cursor: pointer;
   user-select: none;
+}
+.card-check {
+  position: absolute;
+  top: 4px;
+  right: 4px;
 }
 .card:hover {
   background: #f5f7fa;

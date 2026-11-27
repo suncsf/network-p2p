@@ -1,4 +1,5 @@
-import { open, stat } from 'node:fs/promises'
+import { open, lstat, readdir, stat } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import type { ConnectionManager } from './client/manager'
 import type { LatticeServer } from './server/service'
 import type { TransferStore } from './transfers'
@@ -18,6 +19,73 @@ export interface StartUploadParams {
   name: string
   size: number
   peer?: string
+}
+
+export interface StartUploadBatchParams {
+  connId: string
+  /** 远端授权根目录 */
+  root: string
+  /** 远端目标目录（相对根目录，可为空串表示根） */
+  baseDir: string
+  /** 本机源路径（文件或目录，可混合；目录递归展开并保留结构） */
+  sources: string[]
+  peer?: string
+}
+
+/** 批量展开结果 */
+export interface BatchUploadResult {
+  /** 展开后的文件数 */
+  count: number
+  /** 总字节数 */
+  total: number
+}
+
+interface ExpandedFile {
+  filePath: string
+  /** 相对 baseDir 的远端路径（'/' 分隔，含顶层名） */
+  relPath: string
+  size: number
+}
+
+/** 展开上传源：文件原样保留；目录递归展开（不跟随符号链接），远端路径用 '/' 拼接 */
+async function expandSources(sources: string[]): Promise<{ files: ExpandedFile[]; emptyDirs: string[] }> {
+  const files: ExpandedFile[] = []
+  const dirs: string[] = []
+  const walk = async (abs: string, rel: string): Promise<void> => {
+    const st = await lstat(abs)
+    if (st.isDirectory()) {
+      dirs.push(rel)
+      for (const c of await readdir(abs)) {
+        await walk(join(abs, c), `${rel}/${c}`)
+      }
+    } else if (st.isFile()) {
+      let size = 0
+      try {
+        size = (await stat(abs)).size
+      } catch {
+        /* 瞬时不可统计按 0 处理 */
+      }
+      files.push({ filePath: abs, relPath: rel, size })
+    }
+  }
+  for (const src of sources) {
+    const top = basename(src)
+    const st = await lstat(src)
+    if (st.isDirectory()) {
+      await walk(src, top)
+    } else if (st.isFile()) {
+      let size = 0
+      try {
+        size = (await stat(src)).size
+      } catch {
+        /* 同上 */
+      }
+      files.push({ filePath: src, relPath: top, size })
+    }
+  }
+  // 空目录不会随 uploadInit 隐式创建，单独收集后补建
+  const emptyDirs = dirs.filter((d) => !files.some((f) => f.relPath.startsWith(`${d}/`)))
+  return { files, emptyDirs }
 }
 
 interface UploadResume {
@@ -66,6 +134,10 @@ function abortedError(): Error {
 export class TransferRunner {
   /** 进行中的上传任务（记录 id → 任务） */
   private jobs = new Map<number, { aborted: boolean }>()
+
+  /** 批量上传队列：按顺序执行，避免同时发起大量传输 */
+  private queue: number[] = []
+  private pumping = false
 
   constructor(
     private store: TransferStore,
@@ -131,6 +203,75 @@ export class TransferRunner {
     })
     void this.runUpload(rec.id).catch(() => {})
     return rec
+  }
+
+  /**
+   * 批量上传：展开选中的文件/目录（保留目录结构），每个文件一条上传记录，
+   * 依次排队执行（可单独取消/续传，进度见传输面板）。
+   */
+  async startUploadBatch(p: StartUploadBatchParams): Promise<BatchUploadResult> {
+    const { files, emptyDirs } = await expandSources(p.sources)
+    if (files.length === 0 && emptyDirs.length === 0) {
+      throw Object.assign(new Error('没有可上传的文件'), { code: 'BAD_REQUEST' as const })
+    }
+    const peer = p.peer || this.conns.get(p.connId)?.username || '远端'
+    const info = this.conns.get(p.connId)
+    let total = 0
+    for (const f of files) {
+      const remote = p.baseDir ? `${p.baseDir}/${f.relPath}` : f.relPath
+      const resume: UploadResume = {
+        connId: p.connId,
+        host: info?.host,
+        port: info?.port,
+        username: info?.username,
+        root: p.root,
+        path: remote,
+        filePath: f.filePath,
+        size: f.size,
+        uploadId: null,
+        offset: 0
+      }
+      const rec = this.store.create({
+        kind: 'upload',
+        peer,
+        name: basename(f.relPath),
+        remotePath: remote,
+        localPath: f.filePath,
+        total: f.size,
+        state: 'active',
+        resume: JSON.stringify(resume)
+      })
+      total += f.size
+      this.enqueue(rec.id)
+    }
+    // 空目录单独补建（uploadInit 只会隐式创建含文件的父目录）；无 WRITE 权限时忽略
+    for (const d of emptyDirs) {
+      await this.conns
+        .request(p.connId, 'mkdir', { root: p.root, path: p.baseDir ? `${p.baseDir}/${d}` : d })
+        .catch(() => {})
+    }
+    return { count: files.length, total }
+  }
+
+  private enqueue(recId: number): void {
+    this.queue.push(recId)
+    void this.pump()
+  }
+
+  /** 顺序消费上传队列：一次传一个文件，完成或中断后继续下一个 */
+  private async pump(): Promise<void> {
+    if (this.pumping) return
+    this.pumping = true
+    try {
+      while (this.queue.length > 0) {
+        const id = this.queue.shift()!
+        // 排队期间被取消/删除的记录直接跳过
+        if (this.store.get(id)?.state !== 'active') continue
+        await this.runUpload(id)
+      }
+    } finally {
+      this.pumping = false
+    }
   }
 
   private async runUpload(recId: number): Promise<void> {

@@ -46,6 +46,17 @@
 | setApplicationMenu | [移除应用菜单.md](移除应用菜单.md) | app.whenReady 开头置 null 即可，Win/Linux 通用 |
 | 软件更名 | [软件更名.md](软件更名.md) | Lattice → v-Lattice：窗口标题/托盘/品牌名/页面标题/包名/打包产物名/README 共 9 处文件 |
 | v-Lattice | [软件更名.md](软件更名.md) | 新软件名；userData 目录、appId、内部类名有意保留旧名防数据丢失/升级断裂 |
+| 接收传输记录 | [接收传输记录.md](接收传输记录.md) | 对方推送只弹确认不落记录；接收方向补建传输记录，传输面板可见 |
+| ws-recv | [接收传输记录.md](接收传输记录.md) | 新传输类型：WS 上传推送的接收记录；uploadInit 建、chunk 回写进度、finish/abort/close 同步状态 |
+| uploadRecs | [接收传输记录.md](接收传输记录.md) | uploadId→记录 id 映射；base64 长度换算落盘字节（含 padding 修正）回写进度 |
+| p2p-recv补建 | [接收传输记录.md](接收传输记录.md) | 预授权分支 createRecvRecord；resume 上下文带接收目录供 validateToken 兜底重建授权 |
+| 二次确认缓存 | [接收传输记录.md](接收传输记录.md) | ensureUploadAccepted 同路径 5 分钟滑动免确认（设计如此）；不同路径按代码仍会弹确认 |
+| 批量上传 | [批量上传与多选下载.md](批量上传与多选下载.md) | 上传支持多选文件/文件夹：主进程 expandSources 递归展开保留结构，空目录先 mkdir 补建 |
+| startUploadBatch | [批量上传与多选下载.md](批量上传与多选下载.md) | 批量上传入口：每文件一条 upload 记录（可单独取消/续传），enqueue/pump 顺序队列执行 |
+| 顺序上传队列 | [批量上传与多选下载.md](批量上传与多选下载.md) | pump 逐个消费上传队列，避免大量并发；排队中取消的记录跳过 |
+| pickUpload | [批量上传与多选下载.md](批量上传与多选下载.md) | dialog:pickUpload 原生多选对话框（file/dir 分开，Windows 无法混选）；上传按钮改 split-button 下拉 |
+| 批量下载 | [批量上传与多选下载.md](批量上传与多选下载.md) | 列表勾选列 + 卡片复选框，下载选中项一次 P2P 会话，对方只确认一次 |
+| 多路径推流 | [批量上传与多选下载.md](批量上传与多选下载.md) | p2pPush 新增 paths[]：collectTargets 多路径收集去重，单 manifest 推流，resumePush 支持续传 |
 
 ## 当日要点
 
@@ -72,3 +83,16 @@
 
 - 移除 Electron 自带菜单：`src/main/index.ts` 在 `app.whenReady()` 开头 `Menu.setApplicationMenu(null)`；托盘/悬浮球右键菜单不受影响，DevTools（Ctrl+Shift+I）/刷新（Ctrl+R）快捷键随默认菜单失效。
 - 软件更名 v-Lattice：9 处文件同步（主窗口标题、托盘 tooltip、App.vue 品牌名、index/floater 页面标题、package.json + lock 包名 v-lattice、electron-builder.yml productName/copyright/maintainer、README 标题）；userData 目录（lattice）、appId（com.lattice.app）、内部类名有意保留旧名，防已有数据丢失与覆盖安装断裂。
+
+### 第四轮（同日）
+
+- 修「别人推送的看不到传输记录」：接收方向（WS 上传推送 / P2P 对端推送）此前只弹确认不落记录，补建接收记录——新类型 `ws-recv`（WS 接收，uploadRecs 映射回写进度/取消/中断）、`p2p-recv` 预授权分支 createRecvRecord（resume 上下文带接收目录）。提交 d5e4073 推送 GitHub。
+- 关键陷阱：transferGrant 接收授权全为 preAuthorized，requestConfirm 直接放行，记录补建必须放预授权分支。
+- 二次确认疑问结论：ensureUploadAccepted 同路径 5 分钟滑动免确认系 4cc79bb 设计，不同路径仍会弹确认（无代码改动）。
+- 回归测试 +2（e2e 挂 TransferStore），47 项全绿，typecheck 0 错误。
+
+### 第四轮（同日）
+
+- 上传多选：「上传」改 split-button 下拉（上传文件 / 上传文件夹，均可多选，Windows 无法混选故分入口）；主进程 expandSources 递归展开目录保留结构、空目录先 mkdir 补建，startUploadBatch 每文件一条记录经顺序队列逐个上传（可单独取消/续传）。
+- 下载同理：列表加勾选列、卡片加复选框，「下载选中(N)」一次 P2P 会话批量推流；p2pPush 命令新增 paths[] 多路径支持（collectTargets 去重），对方只需确认一次，断点续传同步支持多路径。
+- typecheck 0 错误、47 项测试全绿；改动未提交 git。

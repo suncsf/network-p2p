@@ -49,7 +49,13 @@ const api = {
     remove: (id: number) => ipcRenderer.invoke('transfer:remove', id),
     clearFinished: () => ipcRenderer.invoke('transfer:clearFinished'),
     fail: (sessionId: string, message: string) => ipcRenderer.invoke('transfer:fail', { sessionId, message }),
-    startUpload: (p: unknown) => ipcRenderer.invoke('transfer:startUpload', p)
+    startUpload: (p: unknown) => ipcRenderer.invoke('transfer:startUpload', p),
+    /** 批量上传：多选文件/文件夹（主进程展开目录、逐个排队上传） */
+    startUploadBatch: (p: unknown) => ipcRenderer.invoke('transfer:startUploadBatch', p)
+  },
+  dialog: {
+    /** 选择上传源（mode: file 多选文件 / dir 多选文件夹），返回本机绝对路径列表 */
+    pickUpload: (mode: 'file' | 'dir') => ipcRenderer.invoke('dialog:pickUpload', mode)
   },
   history: {
     list: () => ipcRenderer.invoke('history:list'),
