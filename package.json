@@ -1,10 +1,10 @@
 {
   "name": "v-lattice",
   "version": "0.1.0",
-  "description": "v-Lattice — 局域网 P2P 文件共享工具 (Electron + Element Plus + SQLite)",
+  "description": "V-Lattice — 局域网 P2P 文件共享工具 (Electron + Element Plus + SQLite)",
   "main": "./out/main/index.js",
   "author": {
-    "name": "v-Lattice",
+    "name": "V-Lattice",
     "email": "lattice@example.com"
   },
   "homepage": "https://github.com/lattice/lattice",

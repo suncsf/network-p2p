@@ -128,7 +128,7 @@
         </el-table-column>
         <el-table-column label="服务">
           <template #default="{ row }">
-            <span v-if="row.alive">v-Lattice（{{ row.service?.hostname || '未知主机名' }}，协议 v{{ row.service?.protocolVersion }}）</span>
+            <span v-if="row.alive">V-Lattice（{{ row.service?.hostname || '未知主机名' }}，协议 v{{ row.service?.protocolVersion }}）</span>
           </template>
         </el-table-column>
       </el-table>

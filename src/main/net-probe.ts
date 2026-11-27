@@ -97,7 +97,7 @@ export function probeHost(host: string, port: number, timeoutMs = 1200): Promise
               }
             })
           } else {
-            finish({ host, port, alive: false, error: '端口开放但不是 v-Lattice 服务' })
+            finish({ host, port, alive: false, error: '端口开放但不是 V-Lattice 服务' })
           }
         } catch {
           finish({ host, port, alive: false, error: '端口开放但响应异常' })

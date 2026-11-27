@@ -3,7 +3,7 @@
     <el-aside width="200px" class="sidebar">
       <div class="brand">
         <el-icon :size="22"><Connection /></el-icon>
-        <span>v-Lattice</span>
+        <span>V-Lattice</span>
       </div>
       <el-menu :default-active="active" class="menu" @select="onSelect">
         <el-menu-item index="workspace">
