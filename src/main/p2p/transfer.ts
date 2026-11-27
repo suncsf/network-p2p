@@ -241,8 +241,6 @@ export interface P2PReceiveOptions {
   baseDir: string
   /** 根据会话动态解析下载根目录（例如按 transfer grant 的账户目录） */
   resolveBaseDir?: (sessionId: string) => string | undefined
-  /** 重名冲突「重命名」时的本地名称映射（清单相对路径 → 本地相对路径），由会话授权携带 */
-  mapRelPath?: (sessionId: string, relPath: string) => string | undefined
   /** 校验 token 是否有效（resume=true 表示这是续传连接，可走兜底重建授权） */
   validateToken: (token: string, resume: boolean) => boolean
   /** 请求下载确认；返回是否接受（resume=true 表示这是续传连接） */
@@ -290,9 +288,9 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
     const offsets = new Map<number, number>()
     const writers = new Map<number, import('node:fs/promises').FileHandle>()
 
-    /** 解析清单文件的本地目标路径：应用重名「重命名」映射，统一安全校验 */
+    /** 解析清单文件的本地目标路径：统一安全校验 */
     function resolveTarget(f: { path: string }): { abs: string } {
-      const mapped = opts.mapRelPath?.(sessionId, f.path) ?? f.path
+      const mapped = f.path
       const segments = mapped.replace(/\\/g, '/').split('/').filter((s) => s && s !== '.')
       if (segments.some((s) => s === '..') || path.isAbsolute(mapped)) {
         throw new Error('清单包含非法路径')
@@ -325,20 +323,16 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
     }
 
     socket.on('close', () => {
-      // 等已入队帧全部处理完（DONE 置位 doneReceived、尾部 CHUNK 落盘）再收尾，
-      // 避免把已完成的传输误报为中断、或提前关闭仍在写的句柄
-      void frameQueue.then(async () => {
-        // 完成前断开：通知上层（保留部分文件，可断点续传）
-        if (tokenValid && accepted && !doneReceived) {
-          try {
-            opts.onInterrupted?.(sessionId, received)
-          } catch {
-            /* ignore */
-          }
+      // 完成前断开：通知上层（保留部分文件，可断点续传）
+      if (tokenValid && accepted && !doneReceived) {
+        try {
+          opts.onInterrupted?.(sessionId, received)
+        } catch {
+          /* ignore */
         }
-        for (const fh of writers.values()) await fh.close().catch(() => {})
-        writers.clear()
-      })
+      }
+      for (const fh of writers.values()) fh.close().catch(() => {})
+      writers.clear()
     })
 
     function receiveBase(): string {
@@ -350,21 +344,17 @@ export function createReceiveServer(opts: P2PReceiveOptions): P2PReceiveServer {
       return opts.baseDir
     }
 
-    /** 帧处理串行化：按到达顺序依次处理。小文件的 CHUNK 与 DONE 会挤在同一次 data 事件里，
-     *  若并发处理，DONE 会在 CHUNK 落盘前执行（临时文件还不存在 → 永远不会更名为正式文件） */
-    let frameQueue: Promise<void> = Promise.resolve()
-    let frameFatal = false
-    function onFrame(type: P2PFrameType, payload: Buffer): void {
-      frameQueue = frameQueue
-        .then(() => {
-          if (frameFatal) return
-          return handleFrame(type, payload)
-        })
-        .catch((e) => {
-          frameFatal = true
-          if (!socket.destroyed) socket.destroy(e as Error)
-        })
-    }    async function handleFrame(type: P2PFrameType, payload: Buffer): Promise<void> {
+    async function onFrame(type: P2PFrameType, payload: Buffer): Promise<void> {
+      try {
+        await handleFrame(type, payload)
+      } catch (e) {
+        if (!socket.destroyed) {
+          socket.destroy(e as Error)
+        }
+      }
+    }
+
+    async function handleFrame(type: P2PFrameType, payload: Buffer): Promise<void> {
       switch (type) {
         case P2PFrameType.HELLO: {
           const hello = JSON.parse(payload.toString('utf8')) as {

@@ -24,7 +24,7 @@ import type {
   TransferGrantParams
 } from '@shared/protocol'
 import { PROTOCOL_VERSION } from '@shared/protocol'
-import { createReceiveServer, sendFiles, type P2PReceiveServer } from '@main/p2p/transfer'
+import { createReceiveServer, sendFiles } from '@main/p2p/transfer'
 import net from 'node:net'
 
 export interface ServerConfig {
@@ -56,8 +56,6 @@ interface TransferGrantRecord {
   expiresAt: number
   /** 本机用户主动发起的下载：发起时已选好保存位置，下载端免二次确认 */
   preAuthorized?: boolean
-  /** 重名冲突选择「重命名」时的本地名称映射（远端相对路径前缀 → 本地相对路径前缀） */
-  renameMap?: Record<string, string>
 }
 
 /** P2P 传输授权有效期：需覆盖「对端枚举大文件夹 + 人工确认 + 连接建立」等握手前耗时，握手成功后滑动续期 */
@@ -66,7 +64,7 @@ const GRANT_TTL_MS = 30 * 60 * 1000
 export class LatticeServer {
   private wss?: WebSocketServer
   private http?: Server
-  private p2pServer?: P2PReceiveServer
+  private p2pServer?: net.Server
   private sessions = new Map<string, AuthSession>()
   private transferGrants = new Map<string, TransferGrantRecord>()
   /** WS 下载（对方发起）已确认缓存：key 为 accountId:root:path，值为止步时间；5 分钟内重试/重初始化免二次确认 */
@@ -164,16 +162,6 @@ export class LatticeServer {
         const g = this.transferGrants.get(sessionId)
         return g?.root
       },
-      // 重名「重命名」映射：授权携带，目录级前缀整体替换（最长匹配优先）
-      mapRelPath: (sessionId, relPath) => {
-        const map = this.transferGrants.get(sessionId)?.renameMap
-        if (!map) return undefined
-        let best: string | undefined
-        for (const k of Object.keys(map)) {
-          if ((relPath === k || relPath.startsWith(k + '/')) && (!best || k.length > best.length)) best = k
-        }
-        return best ? map[best] + relPath.slice(best.length) : undefined
-      },
       validateToken: (token, resume) => {
         const g = this.transferGrants.get(token)
         if (g && g.expiresAt > Date.now()) {
@@ -187,12 +175,9 @@ export class LatticeServer {
           const rec = this.store?.getBySession(token).find((r) => r.kind === 'p2p-recv')
           if (rec && rec.state !== 'completed') {
             try {
-              const ctx = JSON.parse(this.store?.getResume(rec.id) ?? '{}') as {
-                dir?: string
-                renameMap?: Record<string, string>
-              }
+              const ctx = JSON.parse(this.store?.getResume(rec.id) ?? '{}') as { dir?: string }
               if (ctx.dir) {
-                this.createLocalTransferGrant(ctx.dir, { token, renameMap: ctx.renameMap })
+                this.createLocalTransferGrant(ctx.dir, { token })
                 this.store?.update(rec.id, { state: 'active', error: null })
                 this.audit.log(null, 'transfer:auto-resume-grant', { sessionId: token })
                 return true
@@ -690,7 +675,7 @@ export class LatticeServer {
   /** 本机下载授权：为 P2P 下载创建一次性 token（下载端为本机服务端，写入目录由调用方指定） */
   createLocalTransferGrant(
     root: string,
-    opts?: { token?: string; renameMap?: Record<string, string> }
+    opts?: { token?: string }
   ): { p2pToken: string; host: string; port: number; sessionId: string } {
     const token = opts?.token ?? generateToken()
     this.transferGrants.set(token, {
@@ -700,8 +685,7 @@ export class LatticeServer {
       relPath: '',
       direction: 'receive',
       expiresAt: Date.now() + GRANT_TTL_MS,
-      preAuthorized: true,
-      ...(opts?.renameMap ? { renameMap: opts.renameMap } : {})
+      preAuthorized: true
     })
     const host = this.listInterfaces()[0] ?? '127.0.0.1'
     return { p2pToken: token, host, port: this.config.p2pPort, sessionId: token }
